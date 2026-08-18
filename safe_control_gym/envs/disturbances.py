@@ -458,6 +458,7 @@ DISTURBANCE_TYPES = {'impulse': ImpulseDisturbance,
                      'white_noise': WhiteNoise,
                      'periodic': PeriodicNoise,
                      'signal_dependent': SignalDependentNoise,
+                     'altitude_gated': AltitudeGatedNoise,
                      }
 
 
