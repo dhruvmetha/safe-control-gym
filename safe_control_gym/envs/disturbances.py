@@ -401,6 +401,55 @@ class AltitudeGatedNoise(Disturbance):
         return disturbed
 
 
+class AltitudeGatedSineNoise(AltitudeGatedNoise):
+    '''Altitude-gated one-sided force with per-rollout coherent randomness.
+
+    F(z, t) = sigma(z) * (0.5 + 0.5 * A * sin(2*pi/period * t + phi))
+
+    phi ~ U(-pi, pi) and A ~ U(0, 1) are drawn ONCE per episode in reset();
+    within an episode the force history is a deterministic function of
+    (z, t, A, phi). Adopted after the per-step uniform draw measured
+    degenerate: ~150 i.i.d. draws integrate to nearly the same impulse on
+    every crossing (fraction_interior peaked at 0.025), whereas holding the
+    gust's strength and phase for the whole rollout keeps trial-to-trial
+    spread at the 30-50% the sweep needs. Mean force is unchanged:
+    E[0.5 + 0.5*A*sin] = 0.5, same as U(0, 1).
+    '''
+
+    def __init__(self, env, dim, mask=None, f_max=0.0, profile='gaussian',
+                 state_index=2, period=2.0, **profile_params):
+        super().__init__(env, dim, mask=mask, f_max=f_max, profile=profile,
+                         state_index=state_index, **profile_params)
+        if period <= 0:
+            raise ValueError('[ERROR] AltitudeGatedSineNoise.__init__(): period '
+                             'must be positive.')
+        self.period = float(period)
+        self.phi = 0.0
+        self.A = 0.0
+        self._t = 0.0
+
+    def reset(self, env):
+        # np_random is bound by Disturbance.seed(), called from
+        # BenchmarkEnv.__init__ (self._setup_disturbances() then self.seed())
+        # before any env.reset() -- and hence before this reset() -- can run.
+        # Guarded anyway: a caller that resets a freshly-constructed instance
+        # without ever calling seed() should fall back to env.np_random
+        # rather than raise, matching the base Disturbance.seed() fallback.
+        rng = getattr(self, 'np_random', None)
+        if rng is None:
+            rng = env.np_random
+        self.phi = float(rng.uniform(-np.pi, np.pi))
+        self.A = float(rng.uniform(0.0, 1.0))
+
+    def _draw(self, bound):
+        wave = 0.5 + 0.5 * self.A * np.sin(2 * np.pi / self.period * self._t + self.phi)
+        return np.full(self.dim, bound * wave)
+
+    def apply(self, target, env):
+        self._t = env.ctrl_step_counter / env.CTRL_FREQ
+        return super().apply(target, env)
+
+
 class BrownianNoise(Disturbance):
     '''Simple random walk noise.'''
 
@@ -459,6 +508,7 @@ DISTURBANCE_TYPES = {'impulse': ImpulseDisturbance,
                      'periodic': PeriodicNoise,
                      'signal_dependent': SignalDependentNoise,
                      'altitude_gated': AltitudeGatedNoise,
+                     'altitude_gated_sine': AltitudeGatedSineNoise,
                      }
 
 

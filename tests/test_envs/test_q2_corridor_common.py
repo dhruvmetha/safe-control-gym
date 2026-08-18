@@ -8,6 +8,7 @@ import importlib.util
 import os
 
 import numpy as np
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _spec = importlib.util.spec_from_file_location(
@@ -50,6 +51,17 @@ def test_build_wires_the_corridor_to_the_dynamics_channel():
         assert isinstance(dist, AltitudeGatedNoise)
         assert dist.profile == 'gaussian'
         assert list(dist.mask) == [1.0, 0.0]
+    finally:
+        env.close()
+
+
+def test_build_with_sine_draw_wires_the_sine_class():
+    from safe_control_gym.envs.disturbances import AltitudeGatedSineNoise
+    env, ctrl = q2c.build(0.01, draw='sine')
+    try:
+        dist = env.disturbances['dynamics'].disturbances[0]
+        assert isinstance(dist, AltitudeGatedSineNoise)
+        assert dist.period == pytest.approx(2.0)
     finally:
         env.close()
 

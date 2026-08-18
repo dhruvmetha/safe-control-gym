@@ -65,17 +65,32 @@ def rollout_seed(base, split_id, index, trial):
                % (2 ** 31 - 1))
 
 
-def build(f_max):
+DRAW_FUNCS = {'uniform': 'altitude_gated', 'sine': 'altitude_gated_sine'}
+SINE_PERIOD = 2.0   # seconds; see AltitudeGatedSineNoise and the spec's re-sweep note
+
+
+def build(f_max, draw='uniform'):
+    '''draw selects the _draw law: 'uniform' (per-step, the original family) or
+    'sine' (AltitudeGatedSineNoise, the per-rollout coherent draw adopted after
+    the sweep found the per-step law's fraction_interior peaking at 0.025 --
+    see "The sweep falsified the per-step draw" in the corridor design spec).
+    'uniform' stays the default so existing callers are unchanged.
+    '''
+    if draw not in DRAW_FUNCS:
+        raise ValueError(f'[ERROR] q2_corridor_common.build(): unknown draw '
+                         f'{draw!r}; choose from {sorted(DRAW_FUNCS)}.')
     kw = dict(quad_type=2, task='stabilization', task_info=TASK_INFO,
               ctrl_freq=100, pyb_freq=5000, gui=False, randomized_init=False,
               episode_len_sec=1000, cost='quadratic', done_on_out_of_bound=True,
               normalized_rl_action_space=True,
               constraints=SAFE_EXPLORER_CONSTRAINTS, done_on_violation=False)
     if f_max > 0:
-        kw['disturbances'] = {'dynamics': [{'disturbance_func': 'altitude_gated',
-                                            'f_max': f_max, 'profile': PROFILE,
-                                            'centre': CENTRE, 'width': WIDTH,
-                                            'mask': [1, 0]}]}
+        disturb_cfg = {'disturbance_func': DRAW_FUNCS[draw],
+                       'f_max': f_max, 'profile': PROFILE,
+                       'centre': CENTRE, 'width': WIDTH, 'mask': [1, 0]}
+        if draw == 'sine':
+            disturb_cfg['period'] = SINE_PERIOD
+        kw['disturbances'] = {'dynamics': [disturb_cfg]}
     env_func = partial(make, 'quadrotor', **kw)
     cfg = ALGO_CONFIGS['safe_explorer_ppo'].copy()
     tmp = tempfile.mkdtemp(prefix='q2corr-')
