@@ -2,7 +2,7 @@
 
 Date: 2026-08-17
 System: quadrotor 2D, `safe_explorer_ppo`, stabilization
-Status: design agreed; sweep not yet run
+Status: draw law revised 2026-08-18 -- per-step uniform measured degenerate (see The sweep falsified the per-step draw), per-rollout sinusoid adopted; re-sweep pending
 
 ## What this is
 
@@ -152,6 +152,29 @@ attribution; and its mean is sigma/2 only per full period, so effective
 difficulty varies with entry timing. Revive it -- as a `_draw` override, see
 "The envelope is a strategy" -- only if the sweep's fraction_interior stop
 condition triggers.
+
+## The sweep falsified the per-step draw
+
+Ran 2026-08-18: 400 random grid states, 30 paired trials, fourteen levels
+0.002-0.80 N. Retention spans 1.00 down to 0.06, but `fraction_interior`
+peaks at **0.025** (10/400 states, at 0.13 N) and never approaches the 0.122
+of the shipped zero-mean family. Raising the force does not help: at 0.50 N
+retention hits 0.09 -- the structural floor set by the 9.25% of successes that
+never enter the band -- with 283 horizon-hits (the quad3d deadline artifact),
+and at 0.80 N interior is exactly 0. The averaging mechanism below is real and
+no F_max escapes it. Decision [user, 2026-08-18]: switch the draw law to the
+banked per-rollout sinusoid; the ladder is re-swept under it.
+
+The switch is `AltitudeGatedSineNoise(AltitudeGatedNoise)`, registered as
+`'altitude_gated_sine'`: `reset()` draws `phi ~ U(-pi, pi)` and `A ~ U(0, 1)`
+once per episode from the seeded stream; `_draw` returns
+`bound * (0.5 + 0.5 * A * sin(2*pi/PERIOD * t + phi))` with `t` the control
+step time and `PERIOD = 2.0 s` (about 1.4x the median band-crossing time --
+inside the control bandwidth, long enough not to average out, short enough
+that a crossing sees a partial cycle rather than a frozen offset). Mean force
+is unchanged (`E[0.5 + 0.5*A*sin] = 0.5`), so the tilt-budget analysis
+carries over. The five objections recorded against the sinusoid below were
+weighed against the measured degeneracy and accepted as the lesser cost.
 
 ## Known cost of the per-step draw
 
