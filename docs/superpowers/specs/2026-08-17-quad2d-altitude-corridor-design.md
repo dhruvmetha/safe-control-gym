@@ -187,11 +187,25 @@ Over all 489,789 shipped eval start states (`roa_labels.txt`, column 1):
 The near-exact fractions come from the stratified grid the shipped set was
 sampled on.
 
-States above the band only meet the corridor if they descend into it. Under the
-corridor framing these are not wasted -- they are the control group, and the
-contrast between "had to cross" and "did not" is the signal. They are, however,
-a compute cost: a state whose trajectory never enters the band gives the same
-answer on all K trials.
+Measured on the undisturbed (`f_max = 0`) trajectory from 20,000 states sampled
+uniformly at random from the shipped set (`q2_corridor_entry.py`):
+
+| region | n | entered |
+| --- | --- | --- |
+| below the band | 2,791 | 5.63% |
+| inside the band | 8,616 | 100.00% |
+| above the band | 8,593 | 6.85% |
+| overall | 20,000 | 46.81% |
+
+Starts outside the band almost never enter it: below the band the trajectory
+either terminates near the floor or never climbs into the corridor; above the
+band it flies directly to the goal, which sits at z=1.0 above the band's top
+edge (0.914), without dropping through. So the disturbance can only reach
+about 47% of eval states, not the 100% a start-state count would suggest.
+Under the corridor framing the states that do cross are not wasted -- they are
+the control group, and the contrast between "had to cross" and "did not" is
+the signal. But a state whose trajectory never enters the band gives the same
+answer on all K trials, so skipping it is worth roughly half the eval compute.
 
 **Mitigation to implement:** roll each eval state once deterministically, and
 spend the K trials only on states whose trajectory enters the band, with a
