@@ -808,35 +808,70 @@ through the band, which is what decides whether the disturbance can reach that
 start state at all. Noise can pull a marginal trajectory in, which is what the
 margin in q2_corridor_collect.py is for.
 
-Usage: python q2_corridor_entry.py --n 20000 --out entry_rate.npz
+Rows are sampled at random from the full grid -- a prefix of the ordered grid
+is one corner and would measure that corner, not the set (the same trap the
+level-0 gate hit). Workers follow q2_collect.py's Pool pattern: each builds
+its own env and rolls a contiguous slice of the picked rows.
+
+Usage: python q2_corridor_entry.py --n 20000 --procs 24 --out entry_rate.npz
 '''
 import argparse
+import os
+from multiprocessing import Pool
 
 import numpy as np
 
-from q2_corridor_common import BAND, build, grid_states, roll, rollout_seed
+from q2_corridor_common import BAND, DET, build, roll, rollout_seed
+
+ARGS = None
+S_PICK = None
+IDX_PICK = None
+
+
+def _init(a, s_pick, idx_pick):
+    global ARGS, S_PICK, IDX_PICK
+    ARGS, S_PICK, IDX_PICK = a, s_pick, idx_pick
+
+
+def _range(rng_pair):
+    lo, hi = rng_pair
+    env, ctrl = build(0.0)
+    entered = np.zeros(hi - lo, dtype=np.uint8)
+    try:
+        for i in range(lo, hi):
+            _, _, _, hit = roll(env, ctrl, S_PICK[i],
+                                rollout_seed(ARGS.base_seed, 1, int(IDX_PICK[i]), 0),
+                                track_band=True)
+            entered[i - lo] = int(hit)
+    finally:
+        env.close()
+    return lo, hi, entered
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--n', type=int, default=20_000)
+    ap.add_argument('--procs', type=int, default=24)
     ap.add_argument('--base_seed', type=int, default=20260817)
     ap.add_argument('--out', default='entry_rate.npz')
     args = ap.parse_args()
 
-    starts, _ = grid_states(0, args.n)
-    env, ctrl = build(0.0)
-    try:
-        entered = np.zeros(len(starts), dtype=np.uint8)
-        for i, s in enumerate(starts):
-            _, _, _, hit = roll(env, ctrl, s, rollout_seed(args.base_seed, 1, i, 0),
-                                track_band=True)
-            entered[i] = int(hit)
-    finally:
-        env.close()
+    rows = np.loadtxt(os.path.join(DET, 'roa_labels.txt'), delimiter=',')
+    rng = np.random.default_rng(0)
+    idx = np.sort(rng.choice(len(rows), args.n, replace=False))
+    picked = rows[idx, 0:6]
 
-    z = starts[:, 1]
-    np.savez(args.out, entered=entered, start_z=z, band=np.asarray(BAND))
+    edges = np.linspace(0, args.n, args.procs + 1).astype(int)
+    ranges = [(int(edges[k]), int(edges[k + 1])) for k in range(args.procs)]
+    entered = np.zeros(args.n, dtype=np.uint8)
+    with Pool(args.procs, initializer=_init,
+              initargs=(args, picked, idx)) as pool:
+        for lo, hi, e in pool.imap_unordered(_range, ranges):
+            entered[lo:hi] = e
+
+    z = picked[:, 1]
+    np.savez(args.out, entered=entered, start_z=z, row_index=idx,
+             band=np.asarray(BAND))
     for lo, hi, label in [(0.0, BAND[0], 'below band'),
                           (BAND[0], BAND[1], 'inside band'),
                           (BAND[1], 2.0, 'above band')]:
@@ -852,7 +887,7 @@ if __name__ == '__main__':
 
 - [ ] **Step 2: Run it in the background**
 
-Run: `nohup python q2_corridor_entry.py --n 20000 --out entry_rate.npz > entry.log 2>&1 &`
+Run: `nohup python3 q2_corridor_entry.py --n 20000 --procs 24 --out entry_rate.npz > entry.log 2>&1 &`
 
 Poll with `tail entry.log`. Do not block a turn on it.
 
@@ -898,55 +933,92 @@ crossing -- estimated at a 4-9% spread on the delivered impulse -- so if the
 shell is too thin the family is not usable and the spec's frozen-field fallback
 should be revisited rather than the levels pushed higher.
 
-Usage: python q2_corridor_sweep.py --n 400 --trials 30 --out sweep.npz
+States are sampled at random from the full grid (a prefix is one corner) and
+each level runs the same picked states, seeded by original row index so levels
+stay paired. Workers follow q2_collect.py's Pool pattern.
+
+Usage: python q2_corridor_sweep.py --n 400 --trials 30 --procs 24 --out sweep.npz
 '''
 import argparse
+import os
+from multiprocessing import Pool
 
 import numpy as np
 
-from q2_corridor_common import HORIZON, build, grid_states, roll, rollout_seed
+from q2_corridor_common import DET, HORIZON, build, roll, rollout_seed
 
 LEVELS = [0.0, 0.002, 0.004, 0.006, 0.009, 0.012, 0.016, 0.020]
+
+ARGS = None
+S_PICK = None
+IDX_PICK = None
+LEVEL = None
+
+
+def _init(a, s_pick, idx_pick, level):
+    global ARGS, S_PICK, IDX_PICK, LEVEL
+    ARGS, S_PICK, IDX_PICK, LEVEL = a, s_pick, idx_pick, level
+
+
+def _range(rng_pair):
+    lo, hi = rng_pair
+    trials = 1 if LEVEL == 0 else ARGS.trials
+    env, ctrl = build(LEVEL)
+    p = np.zeros(hi - lo)
+    hits = 0
+    try:
+        for i in range(lo, hi):
+            ok_count = 0
+            for k in range(trials):
+                ok, steps, _ = roll(env, ctrl, S_PICK[i],
+                                    rollout_seed(ARGS.base_seed, 1,
+                                                 int(IDX_PICK[i]), k))
+                ok_count += int(ok)
+                hits += int(steps >= HORIZON)
+            p[i - lo] = ok_count / trials
+    finally:
+        env.close()
+    return lo, hi, p, hits
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--n', type=int, default=400)
     ap.add_argument('--trials', type=int, default=30)
+    ap.add_argument('--procs', type=int, default=24)
     ap.add_argument('--base_seed', type=int, default=20260817)
     ap.add_argument('--out', default='sweep.npz')
     args = ap.parse_args()
 
-    starts, _ = grid_states(0, args.n)
-    p_all, interior_all, horizon_all = [], [], []
+    rows = np.loadtxt(os.path.join(DET, 'roa_labels.txt'), delimiter=',')
+    rng = np.random.default_rng(0)
+    idx = np.sort(rng.choice(len(rows), args.n, replace=False))
+    picked = rows[idx, 0:6]
 
+    edges = np.linspace(0, args.n, args.procs + 1).astype(int)
+    ranges = [(int(edges[k]), int(edges[k + 1])) for k in range(args.procs)]
+
+    p_all, interior_all, horizon_all = [], [], []
     for level in LEVELS:
-        env, ctrl = build(level)
-        trials = 1 if level == 0 else args.trials
-        try:
-            p = np.zeros(len(starts))
-            hits = 0
-            for i, s in enumerate(starts):
-                ok_count = 0
-                for k in range(trials):
-                    ok, steps, _ = roll(env, ctrl, s,
-                                        rollout_seed(args.base_seed, 1, i, k))
-                    ok_count += int(ok)
-                    hits += int(steps >= HORIZON)
-                p[i] = ok_count / trials
-        finally:
-            env.close()
+        p = np.zeros(args.n)
+        hits = 0
+        with Pool(args.procs, initializer=_init,
+                  initargs=(args, picked, idx, level)) as pool:
+            for lo, hi, pv, h in pool.imap_unordered(_range, ranges):
+                p[lo:hi] = pv
+                hits += h
         interior = float(np.mean((p > 0) & (p < 1)))
         p_all.append(float(p.mean()))
         interior_all.append(interior)
         horizon_all.append(hits)
         print(f'f_max={level:.3f}  p_success={p.mean():.4f}  '
-              f'fraction_interior={interior:.4f}  hit_horizon={hits}')
+              f'fraction_interior={interior:.4f}  hit_horizon={hits}', flush=True)
 
     np.savez(args.out, levels=np.asarray(LEVELS),
              p_success=np.asarray(p_all),
              fraction_interior=np.asarray(interior_all),
-             hit_horizon=np.asarray(horizon_all))
+             hit_horizon=np.asarray(horizon_all),
+             row_index=idx)
 
 
 if __name__ == '__main__':
@@ -955,7 +1027,7 @@ if __name__ == '__main__':
 
 - [ ] **Step 2: Run it in the background**
 
-Run: `nohup python q2_corridor_sweep.py --n 400 --trials 30 --out sweep.npz > sweep.log 2>&1 &`
+Run: `nohup python3 q2_corridor_sweep.py --n 400 --trials 30 --procs 24 --out sweep.npz > sweep.log 2>&1 &`
 
 - [ ] **Step 3: Choose four levels and record them**
 
