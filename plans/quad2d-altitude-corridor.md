@@ -947,7 +947,12 @@ import numpy as np
 
 from q2_corridor_common import DET, HORIZON, build, roll, rollout_seed
 
+# The 0.002-0.020 bracket came from an open-loop impulse estimate and measured
+# far too weak: retention 0.97 at 0.016, fraction_interior 0.0025. The entry
+# data shows 90.75% of successes cross the band, so there is no structural
+# ceiling -- the ladder extends upward until retention actually falls.
 LEVELS = [0.0, 0.002, 0.004, 0.006, 0.009, 0.012, 0.016, 0.020]
+EXT_LEVELS = [0.03, 0.05, 0.08, 0.13, 0.20, 0.30]
 
 ARGS = None
 S_PICK = None
@@ -988,6 +993,7 @@ def main():
     ap.add_argument('--procs', type=int, default=24)
     ap.add_argument('--base_seed', type=int, default=20260817)
     ap.add_argument('--out', default='sweep.npz')
+    ap.add_argument('--levels', type=float, nargs='+', default=LEVELS)
     args = ap.parse_args()
 
     rows = np.loadtxt(os.path.join(DET, 'roa_labels.txt'), delimiter=',')
@@ -999,7 +1005,7 @@ def main():
     ranges = [(int(edges[k]), int(edges[k + 1])) for k in range(args.procs)]
 
     p_all, interior_all, horizon_all = [], [], []
-    for level in LEVELS:
+    for level in args.levels:
         p = np.zeros(args.n)
         hits = 0
         with Pool(args.procs, initializer=_init,
@@ -1014,7 +1020,7 @@ def main():
         print(f'f_max={level:.3f}  p_success={p.mean():.4f}  '
               f'fraction_interior={interior:.4f}  hit_horizon={hits}', flush=True)
 
-    np.savez(args.out, levels=np.asarray(LEVELS),
+    np.savez(args.out, levels=np.asarray(args.levels),
              p_success=np.asarray(p_all),
              fraction_interior=np.asarray(interior_all),
              hit_horizon=np.asarray(horizon_all),
