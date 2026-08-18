@@ -41,7 +41,8 @@ def test_hover_inside_the_band_drifts_positive_x():
             env.DRONE_ID, [0, 0, 0.55], pb.getQuaternionFromEuler([0, 0, 0]),
             physicsClientId=env.PYB_CLIENT)
         env._update_and_store_kinematic_information()
-        hover = np.zeros(2)
+        env._get_observation()   # refresh env.state after the teleport
+        hover = env.U_GOAL.copy()   # per-pair thrust mg/2, physical units
         for _ in range(100):
             env.step(hover)
         assert env.state[0] > 0.01      # x has moved +
@@ -60,7 +61,8 @@ def test_hover_at_the_goal_altitude_does_not_drift():
             env.DRONE_ID, [0, 0, 1.0], pb.getQuaternionFromEuler([0, 0, 0]),
             physicsClientId=env.PYB_CLIENT)
         env._update_and_store_kinematic_information()
-        hover = np.zeros(2)
+        env._get_observation()   # refresh env.state after the teleport
+        hover = env.U_GOAL.copy()   # per-pair thrust mg/2, physical units
         for _ in range(100):
             env.step(hover)
         assert abs(env.state[0]) < 1e-3
@@ -83,7 +85,8 @@ def test_f_max_zero_is_bit_identical_to_no_disturbance():
                 env.DRONE_ID, [0, 0, 0.55], pb.getQuaternionFromEuler([0, 0, 0]),
                 physicsClientId=env.PYB_CLIENT)
             env._update_and_store_kinematic_information()
-            hover = np.zeros(2)
+            env._get_observation()   # refresh env.state after the teleport
+            hover = env.U_GOAL.copy()   # per-pair thrust mg/2, physical units
             for _ in range(50):
                 env.step(hover)
             finals.append(env.state.copy())
