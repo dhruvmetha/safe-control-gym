@@ -176,6 +176,26 @@ is unchanged (`E[0.5 + 0.5*A*sin] = 0.5`), so the tilt-budget analysis
 carries over. The five objections recorded against the sinusoid below were
 weighed against the measured degeneracy and accepted as the lesser cost.
 
+### The adopted law is the sine-enveloped Gaussian
+
+Final revision [user, 2026-08-18]: the campaign law is `sine_gauss`,
+
+```
+F(z, t) = sigma(z) * wave(t) * |N(0, 1)| * 0.6267
+wave(t) = 0.5 + 0.5 * A * sin(2*pi/2.0 * t + phi),  A ~ U(0,1), phi ~ U(-pi,pi) per rollout
+```
+
+`0.6267 = 0.5 / sqrt(2/pi)` keeps `E[F] = sigma(z) * wave / 2`, so the mean
+force -- and with it the tilt budget and the ladder -- matches both earlier
+laws. The trial-to-trial spread still comes from (A, phi); the per-step
+Gaussian adds a broadband floor to the single tone (measured contribution to
+impulse spread: none -- 29.9% with dither vs 30.9% without -- it is texture,
+not fuzziness). Two properties change against the pure sine: the force
+history is no longer deterministic within a rollout, and `sigma(z)` becomes a
+SCALE rather than a hard bound -- `|N|*0.6267` exceeds 1 with probability
+~0.11, so instantaneous force can exceed sigma(z). Both recorded in every
+description JSON.
+
 ## Known cost of the per-step draw
 
 Per-step i.i.d. draws average along a crossing. Measured analytically for D at
