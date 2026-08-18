@@ -112,7 +112,7 @@ def test_mask_kills_the_z_component():
 
 
 def test_bound_tracks_the_env_altitude():
-    '''Same disturbance object, two altitudes, different支 支 support.'''
+    '''Same disturbance object, two altitudes, different support.'''
     dist, env = _make(0.55)
     env.state[2] = 0.55
     hot = max(dist.apply(np.zeros(2), env)[0] for _ in range(400))
@@ -348,7 +348,8 @@ def test_hover_inside_the_band_drifts_positive_x():
             env.DRONE_ID, [0, 0, 0.55], pb.getQuaternionFromEuler([0, 0, 0]),
             physicsClientId=env.PYB_CLIENT)
         env._update_and_store_kinematic_information()
-        hover = np.ones(4) * env.HOVER_RPM / env.MAX_RPM
+        env._get_observation()   # refresh env.state after the teleport
+        hover = env.U_GOAL.copy()   # per-pair thrust mg/2, physical units
         for _ in range(100):
             env.step(hover)
         assert env.state[0] > 0.01      # x has moved +
@@ -367,7 +368,8 @@ def test_hover_at_the_goal_altitude_does_not_drift():
             env.DRONE_ID, [0, 0, 1.0], pb.getQuaternionFromEuler([0, 0, 0]),
             physicsClientId=env.PYB_CLIENT)
         env._update_and_store_kinematic_information()
-        hover = np.ones(4) * env.HOVER_RPM / env.MAX_RPM
+        env._get_observation()   # refresh env.state after the teleport
+        hover = env.U_GOAL.copy()   # per-pair thrust mg/2, physical units
         for _ in range(100):
             env.step(hover)
         assert abs(env.state[0]) < 1e-3
@@ -390,7 +392,8 @@ def test_f_max_zero_is_bit_identical_to_no_disturbance():
                 env.DRONE_ID, [0, 0, 0.55], pb.getQuaternionFromEuler([0, 0, 0]),
                 physicsClientId=env.PYB_CLIENT)
             env._update_and_store_kinematic_information()
-            hover = np.ones(4) * env.HOVER_RPM / env.MAX_RPM
+            env._get_observation()   # refresh env.state after the teleport
+            hover = env.U_GOAL.copy()   # per-pair thrust mg/2, physical units
             for _ in range(50):
                 env.step(hover)
             finals.append(env.state.copy())
@@ -484,9 +487,8 @@ def test_sigma_is_zero_at_the_goal_to_four_decimals():
 
 def test_band_bounds_are_the_one_percent_contour():
     lo, hi = q2c.BAND
-    assert q2c.sigma(lo, 1.0) == np.float64(0.01).astype(float) or abs(
-        q2c.sigma(lo, 1.0) - 0.01) < 1e-6
-    assert abs(q2c.sigma(hi, 1.0) - 0.01) < 1e-6
+    assert abs(q2c.sigma(lo, 1.0) - 0.01) < 1e-9
+    assert abs(q2c.sigma(hi, 1.0) - 0.01) < 1e-9
 
 
 def test_rollout_seed_excludes_the_level():
