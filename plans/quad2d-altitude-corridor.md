@@ -1117,7 +1117,7 @@ def sample_starts(n, seed):
 
 def shard_train(args, lo, hi):
     starts = sample_starts(N_TRAIN, args.base_seed)[lo:hi]
-    env, ctrl = build(args.level)
+    env, ctrl = build(args.level, draw=args.draw)
     states, offsets, labels, seeds = [], [0], [], []
     try:
         for i in range(len(starts)):
@@ -1135,13 +1135,13 @@ def shard_train(args, lo, hi):
              starts=starts.astype(np.float64),
              labels=np.asarray(labels, np.uint8),
              seeds=np.asarray(seeds, np.int64),
-             lo=lo, hi=hi, f_max=args.level)
+             lo=lo, hi=hi, f_max=args.level, draw=args.draw)
     return int(np.sum(labels)), len(labels)
 
 
 def shard_eval(args, lo, hi):
     starts, det_labels = grid_states(lo, hi)
-    env, ctrl = build(args.level)
+    env, ctrl = build(args.level, draw=args.draw)
     hits = np.zeros(len(starts), dtype=np.int32)
     used = np.zeros(len(starts), dtype=np.int32)
     try:
@@ -1164,7 +1164,8 @@ def shard_eval(args, lo, hi):
     finally:
         env.close()
     np.savez(args.out, starts=starts, hits=hits, trials_used=used,
-             det_labels=det_labels, lo=lo, hi=hi, f_max=args.level)
+             det_labels=det_labels, lo=lo, hi=hi, f_max=args.level,
+             draw=args.draw)
     return int(hits.sum()), int(used.sum())
 
 
@@ -1172,6 +1173,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--split', choices=['train', 'eval'], required=True)
     ap.add_argument('--level', type=float, required=True)
+    ap.add_argument('--draw', choices=['uniform', 'sine'], default='sine')
     ap.add_argument('--trials', type=int, default=50)
     ap.add_argument('--shard', type=int, required=True)
     ap.add_argument('--nshards', type=int, required=True)
@@ -1259,7 +1261,9 @@ names are not comparable with any other family:
         'width': 0.12,
         'sigma_at_goal': float(sigma(1.0, f_max)),
         'band_1pct': [round(BAND[0], 4), round(BAND[1], 4)],
-        'redraw': 'per control step',
+        'draw_law': 'sine',
+        'period_s': 2.0,
+        'redraw': 'per-rollout phase and amplitude; deterministic within a rollout',
         'skip_margin_m': 0.10,
     }
     description['eval_statistics']['trials_shortcut'] = int((used == 1).sum())
