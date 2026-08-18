@@ -316,6 +316,91 @@ class SignalDependentNoise(Disturbance):
         return disturbed
 
 
+def _gaussian_profile(z, params):
+    '''Profile D from the corridor spec: a Gaussian bump, in [0, 1].'''
+    if params['width'] <= 0:
+        raise ValueError('[ERROR] AltitudeGatedNoise: width must be positive.')
+    return np.exp(-0.5 * ((z - params['centre']) / params['width']) ** 2)
+
+
+# The altitude envelope is a strategy. A new shape is a new entry here plus its
+# parameters in the disturbance config -- nothing else changes. Entries map
+# name -> fn(z, params) returning a value in [0, 1]; f_max supplies the units.
+ALTITUDE_PROFILES = {'gaussian': _gaussian_profile}
+
+
+class AltitudeGatedNoise(Disturbance):
+    '''One-sided uniform noise whose bound is a function of altitude.
+
+        F ~ U(0, sigma(z)),   sigma(z) = f_max * profile(z)
+
+    ``sigma`` is the BOUND of the draw, not a scale on a fixed distribution --
+    the support itself moves with altitude, so mean (sigma/2) and standard
+    deviation (sigma/(2 sqrt(3))) are locked at a ratio of 1/sqrt(3).
+
+    One-sided on purpose. Every other family here is symmetric about zero; this
+    one has a non-zero mean, so the vehicle must hold a standing tilt against it
+    rather than merely reject jitter.
+
+    ``profile`` names an entry in ``ALTITUDE_PROFILES``; the remaining kwargs
+    are handed to it untouched. The draw law lives in ``_draw`` and nowhere
+    else, so an alternative law (the spec's banked per-rollout sinusoid) is a
+    subclass overriding ``_draw``, not an edit here.
+
+    The altitude is read from ``env.state``, which ``_get_observation`` refreshes
+    at the end of each step, so at ``before_step`` time it is the state entering
+    this step. It is the TRUE state -- the observation disturbance is applied to
+    a copy afterwards -- which is what we want: the corridor is a property of the
+    airspace, not of what the vehicle believes.
+
+    The draw is normalised then scaled rather than drawn directly on
+    ``[0, sigma]``, so the number of variates consumed does not depend on
+    ``f_max``. Two levels sharing a seed then see the same underlying stream,
+    which is the pairing property ``rollout_seed`` exists to provide.
+    '''
+
+    def __init__(self,
+                 env,
+                 dim,
+                 mask=None,
+                 f_max=0.0,
+                 profile='gaussian',
+                 state_index=2,
+                 **profile_params
+                 ):
+        super().__init__(env, dim, mask)
+        if f_max < 0:
+            raise ValueError('[ERROR] AltitudeGatedNoise.__init__(): f_max must be '
+                             'non-negative; it is the upper bound of a one-sided draw.')
+        if profile not in ALTITUDE_PROFILES:
+            raise ValueError(f'[ERROR] AltitudeGatedNoise.__init__(): unknown profile '
+                             f'{profile!r}; registered: {sorted(ALTITUDE_PROFILES)}.')
+        self.f_max = float(f_max)
+        self.profile = profile
+        self.profile_params = {k: float(v) for k, v in profile_params.items()}
+        self.state_index = int(state_index)
+        self.sigma(0.0)   # fail at construction, not mid-rollout, on bad params
+
+    def sigma(self, z):
+        '''The draw bound at altitude z, in newtons.'''
+        return self.f_max * ALTITUDE_PROFILES[self.profile](z, self.profile_params)
+
+    def _draw(self, bound):
+        '''The draw law -- the ONLY place variates are consumed.'''
+        return self.np_random.uniform(0.0, 1.0, size=self.dim) * bound
+
+    def apply(self,
+              target,
+              env
+              ):
+        z = float(np.asarray(env.state).ravel()[self.state_index])
+        noise = self._draw(self.sigma(z))
+        if self.mask is not None:
+            noise *= self.mask
+        disturbed = target + noise
+        return disturbed
+
+
 class BrownianNoise(Disturbance):
     '''Simple random walk noise.'''
 
