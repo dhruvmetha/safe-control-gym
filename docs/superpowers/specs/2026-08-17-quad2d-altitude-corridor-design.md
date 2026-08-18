@@ -2,7 +2,7 @@
 
 Date: 2026-08-17
 System: quadrotor 2D, `safe_explorer_ppo`, stabilization
-Status: draw law revised 2026-08-18 -- per-step uniform measured degenerate (see The sweep falsified the per-step draw), per-rollout sinusoid adopted; re-sweep pending
+Status: draw law: per-rollout sinusoid; ladder chosen 2026-08-18 (0.05/0.08/0.13/0.30); collection pending
 
 ## What this is
 
@@ -264,10 +264,60 @@ sweep that chooses the levels, and a reducer that writes the dataset layout.
 
 ## To be measured before collection
 
-1. **Level ladder.** Starting bracket `F_max` in roughly 0.002-0.020 N, derived
-   from the impulse numbers above, not from the existing family's 0.070-0.200 N
-   -- those are zero-mean and un-gated and do not transfer. `q2_sweep.py` is the
-   pattern.
+1. **Level ladder -- measured.** The impulse-derived 0.002-0.020 N bracket
+   (`q2_corridor_sweep.py`, `q2_sweep.py`'s pattern) measured too weak and was
+   extended, under the same per-step uniform draw, up to 0.80 N. That sweep is
+   labeled **falsified** below -- see "The sweep falsified the per-step draw".
+   The per-rollout sinusoid (`altitude_gated_sine`, commit `c10cf210`) was
+   **adopted** in its place and re-swept on the same 400 states and paired
+   seeds.
+
+   **Uniform (falsified), baseline `p_success` = 0.0825 (`f_max = 0`):**
+
+   | F_max (N) | p_success | retention | fraction_interior | hit_horizon |
+   | --- | --- | --- | --- | --- |
+   | 0.002 | 0.0825 | 1.00 | 0.0000 | 0 |
+   | 0.004 | 0.0825 | 1.00 | 0.0000 | 0 |
+   | 0.006 | 0.0822 | 1.00 | 0.0025 | 0 |
+   | 0.009 | 0.0820 | 0.99 | 0.0025 | 0 |
+   | 0.012 | 0.0807 | 0.98 | 0.0025 | 0 |
+   | 0.016 | 0.0800 | 0.97 | 0.0000 | 0 |
+   | 0.020 | 0.0800 | 0.97 | 0.0000 | 0 |
+   | 0.030 | 0.0793 | 0.96 | 0.0050 | 0 |
+   | 0.050 | 0.0769 | 0.93 | 0.0075 | 0 |
+   | 0.080 | 0.0664 | 0.80 | 0.0225 | 0 |
+   | 0.130 | 0.0520 | 0.63 | 0.0250 | 5 |
+   | 0.200 | 0.0409 | 0.50 | 0.0125 | 0 |
+   | 0.300 | 0.0326 | 0.40 | 0.0175 | 1 |
+   | 0.500 | 0.0077 | 0.09 | 0.0100 | 283 |
+   | 0.800 | 0.0050 | 0.06 | 0.0000 | 84 |
+
+   `fraction_interior` peaks at 0.025 (0.13 N) and never approaches the shipped
+   zero-mean family's 0.122; retention saturates near the 0.09 structural floor
+   set by the 9.25% of successes that never enter the band, so raising `F_max`
+   further does not help.
+
+   **Sine (adopted), same baseline and paired seeds:**
+
+   | F_max (N) | p_success | retention | fraction_interior | hit_horizon |
+   | --- | --- | --- | --- | --- |
+   | 0.050 | 0.0752 | 0.91 | 0.0250 | 0 |
+   | 0.080 | 0.0668 | 0.81 | 0.0450 | 0 |
+   | 0.130 | 0.0513 | 0.62 | 0.0475 | 0 |
+   | 0.200 | 0.0422 | 0.51 | 0.0375 | 2 |
+   | 0.300 | 0.0346 | 0.42 | 0.0375 | 20 |
+
+   **Chosen ladder:** draw law `sine`, four noisy levels `0.05 / 0.08 / 0.13 /
+   0.30` N (retention `0.91 / 0.81 / 0.62 / 0.42`), plus the `f_max = 0`
+   baseline.
+
+   **Dilution point.** Only 46.8% of states ever enter the band
+   (`q2_corridor_entry.py`); the rest are the corridor's designed control
+   group and read `p` in `{0, 1}` on every trial regardless of level, diluting
+   the aggregate `fraction_interior`. The sine family's aggregate 0.0475 (at
+   0.13 N) is roughly 10% of the *touchable* 46.8% of states -- on par with the
+   shipped zero-mean family's 0.122, which has no untouchable states to dilute
+   against.
 2. **Realised trial-to-trial spread**, and the `fraction_interior` it produces.
    If the transition shell is too thin to be useful, the frozen-field
    alternative above is the fallback and this spec should be revised rather than
