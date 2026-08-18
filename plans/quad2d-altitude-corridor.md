@@ -526,7 +526,9 @@ def test_state_bounds_are_applied_after_construction():
         assert env.state_space.low[2] == 0.1
         assert env.state_space.high[2] == 1.5
         assert env.state_space.high[5] == 8.0
-        assert not np.isfinite(env.state_space.high[4])   # theta stays open
+        # index 4 (theta) is untouched by the corridor build: it keeps the
+        # env's own finite default (85 deg), not an override.
+        assert env.state_space.high[4] == env.theta_threshold_radians
     finally:
         env.close()
 ```
@@ -597,12 +599,12 @@ def sigma(z, f_max):
 
 
 def rollout_seed(base, split_id, index, trial):
-    '''Pure function of the coordinates -- deliberately excludes f_max.
+    '''Pure function of the coordinates -- the noise scale is deliberately absent.
 
     A resumed shard draws exactly what an uninterrupted run would have drawn,
-    and every level sees the same stream per (start, trial), so levels are
-    paired and level-to-level differences carry far less variance than the
-    individual estimates.
+    and every rung of the ladder sees the same stream per (start, trial), so
+    rungs are paired and rung-to-rung differences carry far less variance than
+    the individual estimates.
     '''
     return int((base + split_id * 1_000_003 + index * 7919 + trial * 104_729)
                % (2 ** 31 - 1))
