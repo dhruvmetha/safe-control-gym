@@ -720,7 +720,7 @@ import argparse
 
 import numpy as np
 
-from q2_corridor_common import build, grid_states, roll, rollout_seed
+from q2_corridor_common import DET, build, roll, rollout_seed
 
 
 def main():
@@ -730,19 +730,33 @@ def main():
     ap.add_argument('--base_seed', type=int, default=20260817)
     args = ap.parse_args()
 
-    starts, det_labels = grid_states(0, args.n)
+    # Balanced sample, as in q2_validate.py: the grid is ordered, so a raw
+    # prefix is all one corner where everything fails and passes trivially at
+    # 100% without ever exercising the success branch.
+    import os
+    rows = np.loadtxt(os.path.join(DET, 'roa_labels.txt'), delimiter=',')
+    lab = rows[:, 6].astype(int)
+    rng = np.random.default_rng(0)
+    pick = np.sort(np.concatenate([
+        rng.choice(np.flatnonzero(lab == 1), args.n // 2, replace=False),
+        rng.choice(np.flatnonzero(lab == 0), args.n // 2, replace=False)]))
+    starts, det_labels = rows[pick, 0:6], lab[pick]
+
     env, ctrl = build(0.0)
     try:
         got = np.zeros(len(starts), dtype=int)
         for i, s in enumerate(starts):
-            ok, _, _ = roll(env, ctrl, s, rollout_seed(args.base_seed, 1, i, 0))
+            ok, _, _ = roll(env, ctrl, s, rollout_seed(args.base_seed, 1, int(pick[i]), 0))
             got[i] = int(ok)
     finally:
         env.close()
 
     agree = int((got == det_labels).sum())
     frac = agree / len(starts)
-    print(f'agreement {agree}/{len(starts)} = {frac:.4f}')
+    on1 = float((got[det_labels == 1] == 1).mean())
+    on0 = float((got[det_labels == 0] == 0).mean())
+    print(f'agreement {agree}/{len(starts)} = {frac:.4f}  '
+          f'(success rows {on1:.3f}, failure rows {on0:.3f})')
     if frac < args.min_agreement:
         raise SystemExit(f'FAIL: below {args.min_agreement}')
     print('PASS')
