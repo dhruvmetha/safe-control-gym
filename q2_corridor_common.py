@@ -65,32 +65,97 @@ def rollout_seed(base, split_id, index, trial):
                % (2 ** 31 - 1))
 
 
-DRAW_FUNCS = {'uniform': 'altitude_gated', 'sine': 'altitude_gated_sine'}
 SINE_PERIOD = 2.0   # seconds; see AltitudeGatedSineNoise and the spec's re-sweep note
 
+# A noise model names the full disturbance stack for a collection campaign.
+# 'corridor' scales with f_max; 'ambient' is a fixed zero-mean Gaussian side
+# force (std in newtons) that costs no standing tilt and blurs the success
+# boundary in both directions. Swapping models is changing one name; every
+# dataset description records the resolved stack.
+NOISE_MODELS = {
+    'sine': {'corridor': 'altitude_gated_sine', 'ambient': 0.0},
+    'sine+ambient': {'corridor': 'altitude_gated_sine', 'ambient': None},  # ambient required
+    'ambient': {'corridor': None, 'ambient': None},                   # ambient required
+    'uniform': {'corridor': 'altitude_gated', 'ambient': 0.0},        # falsified; kept for reproduction
+}
 
-def build(f_max, draw='uniform'):
-    '''draw selects the _draw law: 'uniform' (per-step, the original family) or
-    'sine' (AltitudeGatedSineNoise, the per-rollout coherent draw adopted after
-    the sweep found the per-step law's fraction_interior peaking at 0.025 --
-    see "The sweep falsified the per-step draw" in the corridor design spec).
-    'uniform' stays the default so existing callers are unchanged.
+
+def resolve_noise_model(model, f_max, ambient=None):
+    '''Resolve a NOISE_MODELS entry plus (f_max, ambient) into the concrete
+    disturbance stack build() installs -- also what a dataset description
+    embeds, so a reader can reproduce the stack without re-deriving it from
+    the model name: corridor disturbance_func, f_max, profile/centre/width
+    (and period for the sine variants), and the resolved ambient std.
+
+    Returns {'model', 'f_max', 'ambient', 'corridor'} where 'corridor' is
+    either None (no corridor term) or the dict handed to `disturbances`.
     '''
-    if draw not in DRAW_FUNCS:
-        raise ValueError(f'[ERROR] q2_corridor_common.build(): unknown draw '
-                         f'{draw!r}; choose from {sorted(DRAW_FUNCS)}.')
+    if model not in NOISE_MODELS:
+        raise ValueError(f'[ERROR] q2_corridor_common.resolve_noise_model(): '
+                         f'unknown model {model!r}; choose from {sorted(NOISE_MODELS)}.')
+    entry = NOISE_MODELS[model]
+
+    if entry['ambient'] is None:
+        if ambient is None:
+            raise ValueError(f'[ERROR] q2_corridor_common.resolve_noise_model(): '
+                             f'model {model!r} requires an ambient std (got None).')
+        resolved_ambient = float(ambient)
+    else:
+        if ambient is not None:
+            raise ValueError(f'[ERROR] q2_corridor_common.resolve_noise_model(): '
+                             f'model {model!r} has a fixed ambient of '
+                             f"{entry['ambient']}; do not pass ambient= (got {ambient!r}).")
+        resolved_ambient = float(entry['ambient'])
+
+    corridor_func = entry['corridor']
+    if corridor_func is None and f_max > 0:
+        raise ValueError(f'[ERROR] q2_corridor_common.resolve_noise_model(): '
+                         f'model {model!r} has no corridor term, so f_max must '
+                         f'be 0 (got {f_max!r}).')
+
+    corridor = None
+    if corridor_func is not None and f_max > 0:
+        corridor = {'disturbance_func': corridor_func, 'f_max': float(f_max),
+                    'profile': PROFILE, 'centre': CENTRE, 'width': WIDTH,
+                    'mask': [1, 0]}
+        if corridor_func == 'altitude_gated_sine':
+            corridor['period'] = SINE_PERIOD
+
+    return {'model': model, 'f_max': float(f_max), 'ambient': resolved_ambient,
+            'corridor': corridor}
+
+
+def build(f_max, model=None, ambient=None, draw=None):
+    '''model selects a NOISE_MODELS entry -- the full disturbance stack for a
+    campaign. Defaults to 'sine', the family adopted after the sweep found
+    the per-step 'uniform' law's fraction_interior peaking at 0.025 (see "The
+    sweep falsified the per-step draw" in the corridor design spec).
+
+    draw='uniform'|'sine' is a deprecated alias kept for older callers (the
+    sweep script, q2_corridor_collect.py); it only takes effect when model is
+    not given.
+    '''
+    if model is None:
+        model = draw if draw is not None else 'sine'
+
+    stack = resolve_noise_model(model, f_max, ambient)
+
     kw = dict(quad_type=2, task='stabilization', task_info=TASK_INFO,
               ctrl_freq=100, pyb_freq=5000, gui=False, randomized_init=False,
               episode_len_sec=1000, cost='quadratic', done_on_out_of_bound=True,
               normalized_rl_action_space=True,
               constraints=SAFE_EXPLORER_CONSTRAINTS, done_on_violation=False)
-    if f_max > 0:
-        disturb_cfg = {'disturbance_func': DRAW_FUNCS[draw],
-                       'f_max': f_max, 'profile': PROFILE,
-                       'centre': CENTRE, 'width': WIDTH, 'mask': [1, 0]}
-        if draw == 'sine':
-            disturb_cfg['period'] = SINE_PERIOD
-        kw['disturbances'] = {'dynamics': [disturb_cfg]}
+    dynamics = []
+    if stack['corridor'] is not None:
+        dynamics.append(dict(stack['corridor']))
+    if stack['ambient'] > 0:
+        # Zero-mean per-step wobble via upstream WhiteNoise, +x only. Costs no
+        # standing tilt (no mean), so it may act at the goal; it is the
+        # pendulum gaussian_signal recipe's diffusion term, corridor-agnostic.
+        dynamics.append({'disturbance_func': 'white_noise',
+                        'std': stack['ambient'], 'mask': [1, 0]})
+    if dynamics:
+        kw['disturbances'] = {'dynamics': dynamics}
     env_func = partial(make, 'quadrotor', **kw)
     cfg = ALGO_CONFIGS['safe_explorer_ppo'].copy()
     tmp = tempfile.mkdtemp(prefix='q2corr-')

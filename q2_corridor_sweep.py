@@ -19,7 +19,7 @@ from multiprocessing import Pool
 
 import numpy as np
 
-from q2_corridor_common import DET, HORIZON, build, roll, rollout_seed
+from q2_corridor_common import DET, HORIZON, NOISE_MODELS, build, roll, rollout_seed
 
 # The 0.002-0.020 bracket came from an open-loop impulse estimate and measured
 # far too weak: retention 0.97 at 0.016, fraction_interior 0.0025. The entry
@@ -32,18 +32,19 @@ ARGS = None
 S_PICK = None
 IDX_PICK = None
 LEVEL = None
-DRAW = None
+MODEL = None
+AMBIENT = None
 
 
-def _init(a, s_pick, idx_pick, level, draw):
-    global ARGS, S_PICK, IDX_PICK, LEVEL, DRAW
-    ARGS, S_PICK, IDX_PICK, LEVEL, DRAW = a, s_pick, idx_pick, level, draw
+def _init(a, s_pick, idx_pick, level, model, ambient):
+    global ARGS, S_PICK, IDX_PICK, LEVEL, MODEL, AMBIENT
+    ARGS, S_PICK, IDX_PICK, LEVEL, MODEL, AMBIENT = a, s_pick, idx_pick, level, model, ambient
 
 
 def _range(rng_pair):
     lo, hi = rng_pair
-    trials = 1 if LEVEL == 0 else ARGS.trials
-    env, ctrl = build(LEVEL, draw=DRAW)
+    trials = 1 if (LEVEL == 0 and (AMBIENT or 0) == 0) else ARGS.trials
+    env, ctrl = build(LEVEL, model=MODEL, ambient=AMBIENT)
     p = np.zeros(hi - lo)
     hits = 0
     try:
@@ -69,8 +70,22 @@ def main():
     ap.add_argument('--base_seed', type=int, default=20260817)
     ap.add_argument('--out', default='sweep.npz')
     ap.add_argument('--levels', type=float, nargs='+', default=LEVELS)
-    ap.add_argument('--draw', choices=['uniform', 'sine'], default='uniform')
+    ap.add_argument('--ambient', type=float, default=0.0)
+    ap.add_argument('--model', choices=sorted(NOISE_MODELS), default=None,
+                    help='noise model (see q2_corridor_common.NOISE_MODELS); '
+                         "defaults to 'sine+ambient' when neither --model nor "
+                         'the deprecated --draw is given')
+    ap.add_argument('--draw', choices=['uniform', 'sine'], default=None,
+                    help='deprecated alias for --model; ignored if --model is given')
     args = ap.parse_args()
+
+    model = args.model if args.model is not None else (
+        args.draw if args.draw is not None else 'sine+ambient')
+    # A fixed-ambient model (its NOISE_MODELS entry's 'ambient' is a number,
+    # not None) rejects an explicit ambient= override -- see
+    # resolve_noise_model(). --ambient defaults to 0.0 regardless of --model,
+    # so only forward it to build() when the resolved model actually takes it.
+    ambient = args.ambient if NOISE_MODELS[model]['ambient'] is None else None
 
     rows = np.loadtxt(os.path.join(DET, 'roa_labels.txt'), delimiter=',')
     rng = np.random.default_rng(0)
@@ -80,16 +95,17 @@ def main():
     edges = np.linspace(0, args.n, args.procs + 1).astype(int)
     ranges = [(int(edges[k]), int(edges[k + 1])) for k in range(args.procs)]
 
-    p_all, interior_all, horizon_all = [], [], []
+    p_all, interior_all, horizon_all, p_states_all = [], [], [], []
     for level in args.levels:
         p = np.zeros(args.n)
         hits = 0
         with Pool(args.procs, initializer=_init,
-                  initargs=(args, picked, idx, level, args.draw)) as pool:
+                  initargs=(args, picked, idx, level, model, ambient)) as pool:
             for lo, hi, pv, h in pool.imap_unordered(_range, ranges):
                 p[lo:hi] = pv
                 hits += h
         interior = float(np.mean((p > 0) & (p < 1)))
+        p_states_all.append(p.copy())
         p_all.append(float(p.mean()))
         interior_all.append(interior)
         horizon_all.append(hits)
@@ -100,6 +116,7 @@ def main():
              p_success=np.asarray(p_all),
              fraction_interior=np.asarray(interior_all),
              hit_horizon=np.asarray(horizon_all),
+             p_states=np.asarray(p_states_all),
              row_index=idx)
 
 

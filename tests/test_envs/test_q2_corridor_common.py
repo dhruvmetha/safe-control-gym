@@ -42,8 +42,10 @@ def test_rollout_seed_excludes_the_level():
 
 
 def test_build_wires_the_corridor_to_the_dynamics_channel():
+    # 'uniform' is falsified and no longer the default (see NOISE_MODELS), but
+    # stays reachable by name for reproduction -- explicitly requested here.
     from safe_control_gym.envs.disturbances import AltitudeGatedNoise
-    env, ctrl = q2c.build(0.01)
+    env, ctrl = q2c.build(0.01, model='uniform')
     try:
         assert 'dynamics' in env.disturbances
         assert 'action' not in env.disturbances
@@ -64,6 +66,89 @@ def test_build_with_sine_draw_wires_the_sine_class():
         assert dist.period == pytest.approx(2.0)
     finally:
         env.close()
+
+
+def test_build_with_sine_model_is_a_single_sine_disturbance():
+    '''model='sine' is the default noise model; unchanged from draw='sine'.'''
+    from safe_control_gym.envs.disturbances import AltitudeGatedSineNoise
+    env, ctrl = q2c.build(0.13, model='sine')
+    try:
+        dists = env.disturbances['dynamics'].disturbances
+        assert len(dists) == 1
+        assert isinstance(dists[0], AltitudeGatedSineNoise)
+    finally:
+        env.close()
+
+
+def test_build_deprecated_draw_alias_matches_the_named_model():
+    env_a, ctrl_a = q2c.build(0.01, draw='sine')
+    env_b, ctrl_b = q2c.build(0.01, model='sine')
+    try:
+        dist_a = env_a.disturbances['dynamics'].disturbances[0]
+        dist_b = env_b.disturbances['dynamics'].disturbances[0]
+        assert type(dist_a) is type(dist_b)
+        assert dist_a.profile == dist_b.profile
+        assert dist_a.period == pytest.approx(dist_b.period)
+    finally:
+        env_a.close()
+        env_b.close()
+
+
+def test_build_with_sine_plus_ambient_wires_both_in_order():
+    from safe_control_gym.envs.disturbances import AltitudeGatedSineNoise, WhiteNoise
+    env, ctrl = q2c.build(0.13, model='sine+ambient', ambient=0.06)
+    try:
+        dists = env.disturbances['dynamics'].disturbances
+        assert len(dists) == 2
+        assert isinstance(dists[0], AltitudeGatedSineNoise)
+        assert isinstance(dists[1], WhiteNoise)
+        assert list(dists[0].mask) == [1.0, 0.0]
+        assert list(dists[1].mask) == [1.0, 0.0]
+        assert dists[1].std[0] == pytest.approx(0.06)
+    finally:
+        env.close()
+
+
+def test_build_with_ambient_model_wires_white_noise_only():
+    from safe_control_gym.envs.disturbances import WhiteNoise
+    env, ctrl = q2c.build(0.0, model='ambient', ambient=0.10)
+    try:
+        dists = env.disturbances['dynamics'].disturbances
+        assert len(dists) == 1
+        assert isinstance(dists[0], WhiteNoise)
+        assert dists[0].std[0] == pytest.approx(0.10)
+    finally:
+        env.close()
+
+
+def test_ambient_model_requires_zero_f_max():
+    with pytest.raises(ValueError):
+        q2c.build(0.13, model='ambient', ambient=0.10)
+
+
+def test_sine_plus_ambient_requires_an_ambient_value():
+    with pytest.raises(ValueError):
+        q2c.build(0.13, model='sine+ambient')
+
+
+def test_fixed_ambient_model_rejects_an_override():
+    with pytest.raises(ValueError):
+        q2c.build(0.13, model='sine', ambient=0.05)
+
+
+def test_unknown_model_raises():
+    with pytest.raises(ValueError):
+        q2c.build(0.13, model='not-a-model')
+
+
+def test_resolve_noise_model_round_trips_the_sine_plus_ambient_stack():
+    stack = q2c.resolve_noise_model('sine+ambient', 0.13, 0.06)
+    assert stack['corridor']['disturbance_func'] == 'altitude_gated_sine'
+    assert stack['corridor']['f_max'] == pytest.approx(0.13)
+    assert stack['corridor']['centre'] == pytest.approx(q2c.CENTRE)
+    assert stack['corridor']['width'] == pytest.approx(q2c.WIDTH)
+    assert stack['corridor']['period'] == pytest.approx(q2c.SINE_PERIOD)
+    assert stack['ambient'] == pytest.approx(0.06)
 
 
 def test_build_at_zero_installs_no_disturbance():
