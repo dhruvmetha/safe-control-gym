@@ -18,7 +18,7 @@ import os
 
 import numpy as np
 
-from q2_corridor_common import BAND, build, grid_states, roll, rollout_seed
+from q2_corridor_common import BAND, NOISE_MODELS, build, grid_states, roll, rollout_seed
 
 N_STATES = 489_789
 N_TRAIN = 500_000
@@ -41,7 +41,7 @@ def sample_starts(n, seed):
 
 def shard_train(args, lo, hi):
     starts = sample_starts(N_TRAIN, args.base_seed)[lo:hi]
-    env, ctrl = build(args.level, draw=args.draw)
+    env, ctrl = build(args.level, model=args.model, ambient=args.ambient)
     states, offsets, labels, seeds = [], [0], [], []
     try:
         for i in range(len(starts)):
@@ -59,28 +59,32 @@ def shard_train(args, lo, hi):
              starts=starts.astype(np.float64),
              labels=np.asarray(labels, np.uint8),
              seeds=np.asarray(seeds, np.int64),
-             lo=lo, hi=hi, f_max=args.level, draw=args.draw)
+             lo=lo, hi=hi, f_max=args.level, model=args.model,
+             ambient=-1.0 if args.ambient is None else args.ambient)
     return int(np.sum(labels)), len(labels)
 
 
 def shard_eval(args, lo, hi):
     starts, det_labels = grid_states(lo, hi)
-    env, ctrl = build(args.level, draw=args.draw)
+    env, ctrl = build(args.level, model=args.model, ambient=args.ambient)
     hits = np.zeros(len(starts), dtype=np.int32)
     used = np.zeros(len(starts), dtype=np.int32)
     try:
         for i in range(len(starts)):
-            # First roll doubles as the reachability probe.
+            # Trial 0 is always the reachability probe. In a top-up window
+            # (trial_lo > 0) it replays identically by seeding and is NOT
+            # counted -- its hits/used live in the first window's file.
             ok, _, _, entered = roll(env, ctrl, starts[i],
                                      rollout_seed(args.base_seed, EVAL_SPLIT_ID, lo + i, 0),
                                      track_band=True)
-            hits[i] = int(ok)
-            used[i] = 1
+            if args.trial_lo == 0:
+                hits[i] = int(ok)
+                used[i] = 1
             reachable = entered or (
                 BAND[0] - MARGIN <= starts[i][1] <= BAND[1] + MARGIN)
             if args.level == 0 or not reachable:
                 continue
-            for k in range(1, args.trials):
+            for k in range(max(1, args.trial_lo), args.trials):
                 ok, _, _ = roll(env, ctrl, starts[i],
                                 rollout_seed(args.base_seed, EVAL_SPLIT_ID, lo + i, k))
                 hits[i] += int(ok)
@@ -89,7 +93,8 @@ def shard_eval(args, lo, hi):
         env.close()
     np.savez(args.out, starts=starts, hits=hits, trials_used=used,
              det_labels=det_labels, lo=lo, hi=hi, f_max=args.level,
-             draw=args.draw)
+             model=args.model, trial_lo=args.trial_lo, trials=args.trials,
+             ambient=-1.0 if args.ambient is None else args.ambient)
     return int(hits.sum()), int(used.sum())
 
 
@@ -97,13 +102,26 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--split', choices=['train', 'eval'], required=True)
     ap.add_argument('--level', type=float, required=True)
-    ap.add_argument('--draw', choices=['uniform', 'sine'], default='sine')
+    ap.add_argument('--model', choices=sorted(NOISE_MODELS), default='sine+ambient')
+    ap.add_argument('--ambient', type=float, default=None)
     ap.add_argument('--trials', type=int, default=50)
+    ap.add_argument('--trial_lo', type=int, default=0,
+                    help='first trial index of this window; seeds are pure '
+                         'functions of (index, trial), so a later top-up window '
+                         'draws exactly what a single long run would have')
     ap.add_argument('--shard', type=int, required=True)
     ap.add_argument('--nshards', type=int, required=True)
     ap.add_argument('--base_seed', type=int, default=20260817)
     ap.add_argument('--out', required=True)
     args = ap.parse_args()
+
+    # Same guardrails as the sweep CLI: never silently drop or invent ambient.
+    entry_ambient = NOISE_MODELS[args.model]['ambient']
+    if entry_ambient is None and args.ambient is None:
+        ap.error(f'model {args.model!r} requires --ambient')
+    if entry_ambient is not None and args.ambient is not None:
+        ap.error(f'model {args.model!r} has fixed ambient; drop --ambient '
+                 f"or use 'sine+ambient'")
 
     # Idempotent: a completed shard is never redone, so resubmitting a partly
     # failed array costs only the missing work.
