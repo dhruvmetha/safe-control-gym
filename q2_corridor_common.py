@@ -108,10 +108,14 @@ def resolve_noise_model(model, f_max, ambient=None):
         resolved_ambient = float(entry['ambient'])
 
     corridor_func = entry['corridor']
-    if corridor_func is None and f_max > 0:
+    if corridor_func is None:
+        if f_max != 0:
+            raise ValueError(f'[ERROR] q2_corridor_common.resolve_noise_model(): '
+                             f'model {model!r} has no corridor term, so f_max must '
+                             f'be exactly 0 (got {f_max!r}).')
+    elif f_max < 0:
         raise ValueError(f'[ERROR] q2_corridor_common.resolve_noise_model(): '
-                         f'model {model!r} has no corridor term, so f_max must '
-                         f'be 0 (got {f_max!r}).')
+                         f'f_max must be >= 0 (got {f_max!r}).')
 
     corridor = None
     if corridor_func is not None and f_max > 0:

@@ -151,6 +151,16 @@ def test_resolve_noise_model_round_trips_the_sine_plus_ambient_stack():
     assert stack['ambient'] == pytest.approx(0.06)
 
 
+def test_negative_f_max_raises():
+    with pytest.raises(ValueError):
+        q2c.build(-0.01, model='sine')
+
+
+def test_ambient_model_rejects_negative_f_max():
+    with pytest.raises(ValueError):
+        q2c.build(-0.01, model='ambient', ambient=0.10)
+
+
 def test_build_at_zero_installs_no_disturbance():
     env, ctrl = q2c.build(0.0)
     try:

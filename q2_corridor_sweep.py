@@ -70,7 +70,7 @@ def main():
     ap.add_argument('--base_seed', type=int, default=20260817)
     ap.add_argument('--out', default='sweep.npz')
     ap.add_argument('--levels', type=float, nargs='+', default=LEVELS)
-    ap.add_argument('--ambient', type=float, default=0.0)
+    ap.add_argument('--ambient', type=float, default=None)
     ap.add_argument('--model', choices=sorted(NOISE_MODELS), default=None,
                     help='noise model (see q2_corridor_common.NOISE_MODELS); '
                          "defaults to 'sine+ambient' when neither --model nor "
@@ -83,9 +83,18 @@ def main():
         args.draw if args.draw is not None else 'sine+ambient')
     # A fixed-ambient model (its NOISE_MODELS entry's 'ambient' is a number,
     # not None) rejects an explicit ambient= override -- see
-    # resolve_noise_model(). --ambient defaults to 0.0 regardless of --model,
-    # so only forward it to build() when the resolved model actually takes it.
-    ambient = args.ambient if NOISE_MODELS[model]['ambient'] is None else None
+    # resolve_noise_model(). --ambient has no default value of its own, so a
+    # mismatch here is always the caller's, and gets a hard CLI error rather
+    # than a silently-dropped flag or build()'s later ValueError.
+    entry_ambient = NOISE_MODELS[model]['ambient']
+    if entry_ambient is not None and args.ambient is not None:
+        ap.error(f'--ambient={args.ambient} is not valid with model {model!r} '
+                 f'(fixed ambient {entry_ambient}); use --model sine+ambient to '
+                 f'set an ambient std.')
+    if entry_ambient is None and args.ambient is None:
+        ap.error(f'model {model!r} requires --ambient (a std in newtons); '
+                 f'it has no fixed value.')
+    ambient = args.ambient if entry_ambient is None else None
 
     rows = np.loadtxt(os.path.join(DET, 'roa_labels.txt'), delimiter=',')
     rng = np.random.default_rng(0)
