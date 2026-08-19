@@ -1,62 +1,166 @@
 '''Aggregate the quad2d altitude-corridor shards into one dataset directory
-per noise level.
+per config, in a STAGING directory only -- publication to the shared root is
+a separate, human-gated step.
 
 Mirrors q2_reduce.py, which is the precedent for the schema: same per-level
 directory contents, same key names, so the corridor family is readable by
-whatever already reads the shipped quad2d set. Two things differ because the
-corridor collector's shards differ from the planar-force collector's:
+whatever already reads the shipped quad2d set. It differs from q2_reduce.py
+in three ways, all forced by how q2_corridor_collect.py's shards differ from
+the planar-force collector's:
 
-  train shards carry no det_labels (q2_corridor_collect.py's shard_train
-  never rolls the deterministic grid), so train.npz and train_statistics
-  drop the deterministic-agreement fields q2_reduce.py reports.
+  Shard files live flat in one directory and their names carry the config,
+  not a level string alone: `{split}_L<level>_A<ambient|none>_k<lo>-<hi>_
+  s<shard>.npz` (see q2_campaign.sbatch, the launcher that names them). The
+  family is three configs -- baseline (level 0, model 'sine', no ambient),
+  sharp (L0.08 A0.06), smooth (L0.05 A0.09) -- named via --config, or given
+  directly with --level/--ambient/--model for one-off reproduction.
 
-  eval shards carry trials_used PER STATE, not a single scalar trials --
-  the reachability shortcut in q2_corridor_collect.py's shard_eval rolls
-  a state once instead of `trials` times when its undisturbed trajectory
-  never comes within MARGIN of the corridor. p_success is therefore
-  hits / trials_used elementwise, and eval_success_prob.npz's `trials` key
-  holds that per-state array (constant in q2_reduce.py, variable here --
-  same key name so downstream readers are unchanged).
+  Eval shards carry trials_used PER STATE, not a single scalar trials -- the
+  reachability shortcut in shard_eval rolls a state once instead of `trials`
+  times when its undisturbed trajectory never comes within MARGIN of the
+  corridor. A shard's trial budget can also be split across multiple
+  k-windows (k0-20, then a top-up k20-50): trial 0 is the reachability
+  probe and is only counted by the window whose trial_lo is 0, so summing
+  hits and trials_used across a shard's windows recovers the same total a
+  single uninterrupted run would have produced, including the shortcut's
+  trials_used == 1. This reducer merges every window found for a shard
+  before concatenating across shards.
 
-The description also gains a `generation_parameters.corridor` block record-
-ing the band geometry, and eval_statistics gains trials_shortcut /
-trials_full so the shortcut's effect on the estimate is visible next to the
-numbers it produced.
+  Train shards carry no det_labels (shard_train never rolls the
+  deterministic grid), so train.npz and train_statistics drop the
+  deterministic-agreement fields q2_reduce.py reports.
+
+The description also gains `generation_parameters.noise_model` (the resolved
+disturbance stack, from q2_corridor_common.resolve_noise_model) and
+`generation_parameters.corridor` (the band geometry), and eval_statistics
+gains trials_shortcut / trials_full / num_windows / k_total so the shortcut's
+effect on the estimate, and how much of the trial budget has landed, are
+visible next to the numbers they produced.
+
+Refuses to reduce a config whose shards are incomplete (missing a shard index
+0..nshards-1) unless run with --allow_partial, which is for previews only.
+
+Usage:
+  python q2_corridor_reduce.py --config sharp --out_dir /tmp/reduce_preview/sharp
+  python q2_corridor_reduce.py --level 0.08 --ambient 0.06 --model sine+ambient \\
+      --out_dir /tmp/x --allow_partial
 '''
+import argparse
 import glob
 import json
 import os
+import re
 import sys
+from collections import defaultdict
 
 import numpy as np
 
 sys.path.insert(0, os.environ.get('SCG_REPO', '.'))
 from q2_common import HORIZON, STATE_BOUNDS, TOL  # noqa: E402
-from q2_corridor_common import BAND, CENTRE, PROFILE, SINE_PERIOD, WIDTH, sigma  # noqa: E402
+from q2_corridor_common import (BAND, CENTRE, PROFILE, SINE_PERIOD, WIDTH, resolve_noise_model,  # noqa: E402
+                                sigma)
 
-ROOT = os.environ.get('Q2CORR_OUT', os.path.expanduser('~/scg-repo/q2corrout'))
-DEST = os.environ.get('Q2CORR_DATASET', os.path.expanduser('~/scg-repo/q2corrdataset'))
 CAL_N = 10_000
 SPLIT_SEED = 20260813
 WEIGHT_N = 0.027 * 9.81
 SKIP_MARGIN_M = 0.10  # q2_corridor_collect.py's MARGIN; kept as a literal here
 # since the collector does not export the name.
 
+# The collected family: level/ambient/model per config name, plus the
+# expected shard count that makes a reduction "complete" (q2_campaign.sbatch
+# submissions for this family -- train 100 shards throughout; eval 112 for
+# the baseline's smaller deterministic-agreement pass, 560 for the noisy
+# configs' full corridor sweep).
+CONFIGS = {
+    'baseline': dict(level=0.0, ambient=None, model='sine', n_train=100, n_eval=112),
+    'sharp': dict(level=0.08, ambient=0.06, model='sine+ambient', n_train=100, n_eval=560),
+    'smooth': dict(level=0.05, ambient=0.09, model='sine+ambient', n_train=100, n_eval=560),
+}
 
-def reduce_train(level, out_dir):
-    files = sorted(glob.glob(os.path.join(ROOT, 'train', f'L{level}_s*.npz')))
-    if not files:
+SHARD_RE = re.compile(
+    r'^(?P<split>train|eval)_L(?P<level>[0-9.]+)_A(?P<amb>none|[0-9.]+)_'
+    r'k(?P<klo>\d+)-(?P<khi>\d+)_s(?P<shard>\d+)\.npz$')
+
+
+class MissingShardsError(Exception):
+    '''Raised when a config's shards do not cover every index 0..n-1 and
+    --allow_partial was not given.'''
+
+    def __init__(self, split, missing):
+        self.split, self.missing = split, missing
+        super().__init__(f'{split}: missing shard indices {missing}')
+
+
+def _shard_match(name, split, level, ambient, tol=1e-9):
+    m = SHARD_RE.match(name)
+    if not m or m['split'] != split:
+        return None
+    if abs(float(m['level']) - level) > tol:
+        return None
+    if ambient is None:
+        if m['amb'] != 'none':
+            return None
+    elif m['amb'] == 'none' or abs(float(m['amb']) - ambient) > tol:
+        return None
+    return dict(klo=int(m['klo']), khi=int(m['khi']), shard=int(m['shard']))
+
+
+def find_shard_files(shard_dir, split, level, ambient):
+    '''-> {shard_idx: [(path, klo, khi), ...]}, windows sorted by klo.
+
+    Matches on the parsed (level, ambient) values rather than a formatted
+    string, so it is indifferent to how the submitting sbatch call spelled
+    the CLI floats (e.g. '0.08' vs '0.080').
+    '''
+    by_idx = defaultdict(list)
+    pattern = os.path.join(shard_dir, f'{split}_L*_A*_k*-*_s*.npz')
+    for path in sorted(glob.glob(pattern)):
+        info = _shard_match(os.path.basename(path), split, level, ambient)
+        if info is None:
+            continue
+        by_idx[info['shard']].append((path, info['klo'], info['khi']))
+    for idx in by_idx:
+        by_idx[idx].sort(key=lambda t: t[1])
+    return dict(by_idx)
+
+
+def missing_shards(by_idx, n_expected):
+    '''Shard indices in 0..n_expected-1 with no file at all.'''
+    return [i for i in range(n_expected) if i not in by_idx]
+
+
+def _check_shard_params(d, level, ambient, model, path):
+    if abs(float(d['f_max']) - level) > 1e-9:
+        raise ValueError(f"{path}: f_max {float(d['f_max'])} != expected {level}")
+    if str(d['model']) != model:
+        raise ValueError(f"{path}: model {str(d['model'])!r} != expected {model!r}")
+    expected_amb = -1.0 if ambient is None else ambient
+    if abs(float(d['ambient']) - expected_amb) > 1e-9:
+        raise ValueError(f"{path}: ambient {float(d['ambient'])} != expected {expected_amb}")
+
+
+def reduce_train(by_idx, level, ambient, model, out_dir):
+    '''by_idx: shard_idx -> [(path, klo, khi), ...] from find_shard_files.
+
+    Train shards have exactly one window (k0-1); asserts that rather than
+    silently merging, since a top-up scheme has never applied to train.
+    '''
+    if not by_idx:
         return None
     states, offsets, starts, labels, seeds = [], [0], [], [], []
-    draw = None
-    for f in files:
-        d = np.load(f)
+    for idx in sorted(by_idx):
+        windows = by_idx[idx]
+        if len(windows) != 1:
+            raise ValueError(f'train shard {idx} has {len(windows)} window files, expected 1: '
+                             f'{[p for p, _, _ in windows]}')
+        path, _, _ = windows[0]
+        d = np.load(path)
+        _check_shard_params(d, level, ambient, model, path)
         states.append(d['states'])
         offsets.extend((d['offsets'][1:] + offsets[-1]).tolist())
         starts.append(d['starts'])
         labels.append(d['labels'])
         seeds.append(d['seeds'])
-        draw = str(d['draw'])
     states = np.concatenate(states)
     labels = np.concatenate(labels)
     offsets = np.asarray(offsets, dtype=np.int64)
@@ -77,27 +181,47 @@ def reduce_train(level, out_dir):
                 success_rate=float(labels.mean()),
                 mean_length=float(lengths.mean()), max_length=int(lengths.max()),
                 hit_horizon=int((lengths - 1 >= HORIZON).sum()),
-                total_states=int(len(states)), shards=len(files), draw=draw)
+                total_states=int(len(states)), shards=len(by_idx), model=model)
 
 
-def reduce_eval(level, out_dir):
-    files = sorted(glob.glob(os.path.join(ROOT, 'eval', f'L{level}_s*.npz')))
-    if not files:
+def reduce_eval(by_idx, level, ambient, model, out_dir):
+    '''by_idx: shard_idx -> [(path, klo, khi), ...] from find_shard_files.
+
+    Merges every k-window of a shard by SUMMING hits and trials_used per
+    state before concatenating across shards -- the windows partition a
+    state's trials (see module docstring), so the sum is the same total a
+    single uninterrupted run at `trials=k_total` would have produced.
+    '''
+    if not by_idx:
         return None
-    starts, hits, det, used = [], [], [], []
-    draw = None
-    for f in files:
-        d = np.load(f)
-        starts.append(d['starts'])
-        hits.append(d['hits'])
-        det.append(d['det_labels'])
-        used.append(d['trials_used'])
-        draw = str(d['draw'])
-    starts = np.concatenate(starts)
-    hits = np.concatenate(hits)
-    det = np.concatenate(det)
-    used = np.concatenate(used)
-    p = hits / used
+    starts_chunks, hits_chunks, used_chunks, det_chunks = [], [], [], []
+    window_tags = set()
+    for idx in sorted(by_idx):
+        merged_hits = merged_used = starts_ref = det_ref = None
+        for path, klo, khi in by_idx[idx]:
+            window_tags.add((klo, khi))
+            d = np.load(path)
+            _check_shard_params(d, level, ambient, model, path)
+            s = d['starts']
+            h = d['hits'].astype(np.int64)
+            u = d['trials_used'].astype(np.int64)
+            det = d['det_labels']
+            if starts_ref is None:
+                starts_ref, det_ref = s, det
+                merged_hits, merged_used = np.zeros_like(h), np.zeros_like(u)
+            elif not np.array_equal(s, starts_ref):
+                raise ValueError(f'starts mismatch across windows for shard {idx}: {path}')
+            merged_hits += h
+            merged_used += u
+        starts_chunks.append(starts_ref)
+        hits_chunks.append(merged_hits)
+        used_chunks.append(merged_used)
+        det_chunks.append(det_ref)
+    starts = np.concatenate(starts_chunks)
+    hits = np.concatenate(hits_chunks)
+    used = np.concatenate(used_chunks)
+    det = np.concatenate(det_chunks)
+    p = np.divide(hits, used, out=np.zeros(len(hits), dtype=np.float64), where=used > 0)
 
     body = '\n'.join(','.join(f'{v:.6f}' for v in r) + f',{q:.4f}'
                      for r, q in zip(starts, p))
@@ -112,21 +236,23 @@ def reduce_eval(level, out_dir):
             fh.write('\n'.join(lines[i] for i in idx) + '\n')
 
     np.savez(os.path.join(out_dir, 'eval_success_prob.npz'),
-             starts=starts, successes=hits, trials=used,
-             p_success=p, det_labels=det)
+             starts=starts, successes=hits, trials=used, p_success=p, det_labels=det)
     return dict(num_states=int(len(p)), mean_trials=float(used.mean()),
                 mean_p_success=float(p.mean()),
                 fraction_interior=float(((p > 0) & (p < 1)).mean()),
                 agreement_with_deterministic=float(((hits > 0).astype(int) == det).mean()),
-                deterministic_rate=float((det == 1).mean()), shards=len(files),
-                draw=draw, trials_shortcut=int((used == 1).sum()),
-                trials_full=int((used > 1).sum()))
+                deterministic_rate=float((det == 1).mean()), shards=len(by_idx), model=model,
+                trials_shortcut=int((used == 1).sum()), trials_full=int((used > 1).sum()),
+                num_windows=len(window_tags),
+                k_total=max((khi for _, khi in window_tags), default=0))
 
 
-def describe(level, f_max, tr, ev):
+def describe(level, ambient, model, tr, ev):
+    stack = resolve_noise_model(model, level, ambient)
     desc = {
         'dataset_name': ('2D Quadrotor RL (safe_explorer_ppo) under an '
-                         f'altitude-gated corridor disturbance, f_max={level}'),
+                         f'altitude-gated corridor disturbance, model={model} '
+                         f'f_max={level} ambient={ambient}'),
         'mechanism': {
             'kind': 'dynamics', 'dim': 1, 'frame': 'world',
             'applied_as': '[Fx, 0, 0] at the COM link -- one-sided, +x only, NO torque',
@@ -134,7 +260,8 @@ def describe(level, f_max, tr, ev):
             'hold': 'coherent per-rollout sinusoid (draw_law sine), NOT redrawn per step',
             'matched': False,
             'reference_scale': {'body_weight_N': WEIGHT_N,
-                                'level_as_fraction_of_weight': float(f_max) / WEIGHT_N},
+                                'level_as_fraction_of_weight': float(level) / WEIGHT_N
+                                if level else 0.0},
             'note': ('A corridor of disturbed air below the goal, gated by '
                      'altitude rather than uniform over the state space -- see '
                      "the 'corridor' block below for the geometry."),
@@ -189,6 +316,7 @@ def describe(level, f_max, tr, ev):
         'eval_statistics': ev,
     }
     desc['generation_parameters'] = {
+        'noise_model': stack,
         'corridor': {
             'mechanism': 'altitude_gated',
             'channel': 'dynamics',
@@ -196,43 +324,101 @@ def describe(level, f_max, tr, ev):
             'direction': '+x',
             'profile': PROFILE,
             'formula': 'F_x ~ U(0, f_max * exp(-0.5*((z-centre)/width)**2))',
-            'f_max': float(f_max),
+            'f_max': float(level),
             'centre': CENTRE,
             'width': WIDTH,
-            'sigma_at_goal': float(sigma(1.0, f_max)),
+            'sigma_at_goal': float(sigma(1.0, level)),
             # 3dp, not 4: BAND is (0.1858175, 0.9141825), and the canonical
             # label used everywhere else (q2_corridor_common.py's own BAND
-            # comment, the design spec, and this task's own verification
-            # step) is the rounder [0.186, 0.914]. round(BAND, 4) would give
-            # [0.1858, 0.9142], which is off by a digit from that label.
+            # comment, the design spec) is the rounder [0.186, 0.914].
+            # round(BAND, 4) would give [0.1858, 0.9142], off by a digit.
             'band_1pct': [round(BAND[0], 3), round(BAND[1], 3)],
-            'draw_law': 'sine',
+            'draw_law': model,
             'period_s': SINE_PERIOD,
+            'ambient_std': stack['ambient'],
             'redraw': 'per-rollout phase and amplitude; deterministic within a rollout',
             'skip_margin_m': SKIP_MARGIN_M,
         },
     }
-    if ev is not None:
-        desc['eval_statistics']['trials_shortcut'] = ev['trials_shortcut']
-        desc['eval_statistics']['trials_full'] = ev['trials_full']
     return desc
 
 
-def main():
-    levels = sys.argv[1:] or ['0', '0.050', '0.080', '0.130', '0.300']
-    for lv in levels:
-        fl = float(lv)
-        out_dir = os.path.join(DEST, f'f_{fl:.3f}')
-        os.makedirs(out_dir, exist_ok=True)
-        tr = reduce_train(lv, out_dir)
-        ev = reduce_eval(lv, out_dir)
-        desc = describe(lv, fl, tr, ev)
-        for name, payload in (('dataset_description.json', desc),
-                              ('train_description.json', {**desc, 'split': 'train'}),
-                              ('eval_description.json', {**desc, 'split': 'eval'})):
-            with open(os.path.join(out_dir, name), 'w') as fh:
-                json.dump(payload, fh, indent=2)
-        print(f'f_{fl:.3f}: train={tr} eval={ev}', flush=True)
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--config', choices=sorted(CONFIGS),
+                    help='one of the collected family; sets level/ambient/model/nshards')
+    ap.add_argument('--level', type=float, help='overrides --config, or stands alone')
+    ap.add_argument('--ambient', type=float, help='overrides --config; omit for none')
+    ap.add_argument('--model', help='overrides --config')
+    ap.add_argument('--n_train', type=int, help='overrides --config; expected train shard count')
+    ap.add_argument('--n_eval', type=int, help='overrides --config; expected eval shard count')
+    ap.add_argument('--shard_dir',
+                    default=os.environ.get('Q2CORR_SHARDS', '/common/users/dm1487/q2_corridor_shards'))
+    ap.add_argument('--out_dir', required=True,
+                    help='STAGING directory. Never a shared/published path -- '
+                         'publication is a separate, human-gated step.')
+    ap.add_argument('--allow_partial', action='store_true',
+                    help='reduce even if some shard indices are missing (previews only)')
+    args = ap.parse_args(argv)
+    if args.config is None and args.level is None:
+        ap.error('--config or --level is required')
+    return args
+
+
+def resolve_config(args):
+    if args.config is not None:
+        cfg = dict(CONFIGS[args.config])
+    else:
+        cfg = dict(level=None, ambient=None, model='sine+ambient', n_train=100, n_eval=560)
+    if args.level is not None:
+        cfg['level'] = args.level
+    if args.ambient is not None:
+        cfg['ambient'] = args.ambient
+    if args.model is not None:
+        cfg['model'] = args.model
+    if args.n_train is not None:
+        cfg['n_train'] = args.n_train
+    if args.n_eval is not None:
+        cfg['n_eval'] = args.n_eval
+    if cfg['level'] is None:
+        raise SystemExit('[ERROR] q2_corridor_reduce.py: --level required when --config '
+                         'is not given')
+    return cfg
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    cfg = resolve_config(args)
+    level, ambient, model = cfg['level'], cfg['ambient'], cfg['model']
+
+    train_by_idx = find_shard_files(args.shard_dir, 'train', level, ambient)
+    eval_by_idx = find_shard_files(args.shard_dir, 'eval', level, ambient)
+    missing_train = missing_shards(train_by_idx, cfg['n_train'])
+    missing_eval = missing_shards(eval_by_idx, cfg['n_eval'])
+    if (missing_train or missing_eval) and not args.allow_partial:
+        if missing_train:
+            print(f'[ERROR] q2_corridor_reduce.py: missing train shards '
+                  f"({len(missing_train)}/{cfg['n_train']}) for level={level} "
+                  f'ambient={ambient} model={model!r}: {missing_train}', file=sys.stderr)
+        if missing_eval:
+            print(f'[ERROR] q2_corridor_reduce.py: missing eval shards '
+                  f"({len(missing_eval)}/{cfg['n_eval']}) for level={level} "
+                  f'ambient={ambient} model={model!r}: {missing_eval}', file=sys.stderr)
+        print('[ERROR] q2_corridor_reduce.py: refusing to reduce a partial config; '
+              'pass --allow_partial for a preview.', file=sys.stderr)
+        sys.exit(1)
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    tr = reduce_train(train_by_idx, level, ambient, model, args.out_dir)
+    ev = reduce_eval(eval_by_idx, level, ambient, model, args.out_dir)
+    desc = describe(level, ambient, model, tr, ev)
+    for name, payload in (('dataset_description.json', desc),
+                          ('train_description.json', {**desc, 'split': 'train'}),
+                          ('eval_description.json', {**desc, 'split': 'eval'})):
+        with open(os.path.join(args.out_dir, name), 'w') as fh:
+            json.dump(payload, fh, indent=2)
+    print(f'{args.out_dir}: train={tr} eval={ev}', flush=True)
 
 
 if __name__ == '__main__':
