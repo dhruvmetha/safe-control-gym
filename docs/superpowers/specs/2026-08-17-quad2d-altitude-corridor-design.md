@@ -176,7 +176,41 @@ is unchanged (`E[0.5 + 0.5*A*sin] = 0.5`), so the tilt-budget analysis
 carries over. The five objections recorded against the sinusoid below were
 weighed against the measured degeneracy and accepted as the lesser cost.
 
-### The adopted law is the sine-enveloped Gaussian
+### The collected family: two sine+ambient configs
+
+CORRECTION 2026-08-19: the sine_gauss law described below was PAUSED
+mid-implementation by the user and never landed; the paragraph is kept as a
+considered-variant record, not as the adopted law. What was actually adopted,
+swept and collected is the ADDITIVE two-term model:
+
+```
+F_x = sigma(z) * (0.5 + 0.5 * A * sin(2*pi/2.0 * t + phi))  +  N(0, alpha)
+      [corridor: per-rollout coherent gust]                    [ambient wobble,
+                                                                every step, everywhere]
+```
+
+registered as NOISE_MODELS['sine+ambient']. A 16-cell (F_max x alpha) grid
+plus per-state rescued/broken analysis and dense (x, z) heatmap slices chose
+TWO configs, both collected [user, 2026-08-19]:
+
+| level name | F_max | alpha | retention | fuzzy | character |
+| --- | --- | --- | --- | --- | --- |
+| sharp | 0.08 | 0.06 | 0.74 | 8.5% | corridor-dominant: hard failure lobes, thin fuzzy rim |
+| smooth | 0.05 | 0.09 | 0.76 | 10.0% | wobble-dominant: wide 0-to-1 probability field |
+
+plus a same-code baseline (F=0, alpha=0). Eval runs K=20 with the trial-window
+mechanism (--trial_lo): a later top-up to K=50 draws bit-identical trials
+(window-sum == single-run, verified). Publication target
+[user, 2026-08-19]:
+
+```
+DATA_ROOT/stochastic/quadrotor2D/corridor_sine_ambient/rl/{baseline,sharp,smooth}/
+```
+
+with st1122 granted read access at placement, and the announcement DM sent
+only after access is verified.
+
+### The sine-enveloped Gaussian (considered, paused, not collected)
 
 Final revision [user, 2026-08-18]: the campaign law is `sine_gauss`,
 
