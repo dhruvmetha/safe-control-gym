@@ -1,11 +1,20 @@
 '''quad2d stochastic collection under the altitude corridor.
 
-Eval implements the spec's mitigation: a state whose undisturbed trajectory
-never comes within MARGIN of the corridor cannot be reached by the disturbance,
-so it is rolled once instead of `trials` times and its p_success is 0 or 1. The
-margin covers trajectories that noise could pull into the band. `trials_used` is
-stored per state so the reducer can report exactly how many were shortcut rather
-than leaving it implicit.
+Eval implements the spec's mitigation, but ONLY for models with no ambient
+term: a state whose undisturbed trajectory never comes within MARGIN of the
+corridor cannot be reached by an altitude-gated disturbance, so it is rolled
+once instead of `trials` times and its p_success is 0 or 1. The margin covers
+trajectories that noise could pull into the band. `trials_used` is stored per
+state so the reducer can report exactly how many were shortcut rather than
+leaving it implicit.
+
+The shortcut does NOT apply when ambient > 0. The ambient term is white noise
+on the same mask with no altitude gate, so it reaches a start at any height and
+the "cannot be reached" premise is simply false. This was measured, not
+reasoned: 10 shortcut states from the sharp run (f_max 0.08, ambient 0.06) were
+re-flown 20 times each, and 7 of them varied, having been recorded as certain
+successes. No wider MARGIN fixes this, because there is no altitude at which
+the ambient term switches off.
 
 Usage:
   python q2_corridor_collect.py --split train --level 0.009 \\
@@ -69,6 +78,7 @@ def shard_eval(args, lo, hi):
     env, ctrl = build(args.level, model=args.model, ambient=args.ambient)
     hits = np.zeros(len(starts), dtype=np.int32)
     used = np.zeros(len(starts), dtype=np.int32)
+    ambient_on = args.ambient is not None and args.ambient > 0
     try:
         for i in range(len(starts)):
             # Trial 0 is always the reachability probe. In a top-up window
@@ -80,10 +90,19 @@ def shard_eval(args, lo, hi):
             if args.trial_lo == 0:
                 hits[i] = int(ok)
                 used[i] = 1
-            reachable = entered or (
-                BAND[0] - MARGIN <= starts[i][1] <= BAND[1] + MARGIN)
-            if args.level == 0 or not reachable:
-                continue
+            # The shortcut is sound only when EVERY disturbance term is gated
+            # on altitude. The corridor gust is, through sigma(z). The ambient
+            # term is NOT -- build() adds it as white_noise with no altitude
+            # condition, so it acts on a start at any height, 1200 steps per
+            # rollout. Measured 2026-08-19 at f_max 0.08 / ambient 0.06: of 10
+            # shortcut states re-flown 20 times, 7 varied. They were recorded
+            # as p_success 1.0 and came back 13, 15, 17, 17, 17, 17 and 18 of
+            # 20. So with an ambient term every state gets the full `trials`.
+            if not ambient_on:
+                reachable = entered or (
+                    BAND[0] - MARGIN <= starts[i][1] <= BAND[1] + MARGIN)
+                if args.level == 0 or not reachable:
+                    continue
             for k in range(max(1, args.trial_lo), args.trials):
                 ok, _, _ = roll(env, ctrl, starts[i],
                                 rollout_seed(args.base_seed, EVAL_SPLIT_ID, lo + i, k))

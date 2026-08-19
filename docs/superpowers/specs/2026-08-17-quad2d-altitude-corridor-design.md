@@ -289,6 +289,39 @@ spend the K trials only on states whose trajectory enters the band, with a
 margin in z to cover trajectories that noise could push in. States outside the
 margin get `p_success` from the single roll.
 
+**FALSIFIED 2026-08-19, for any model carrying an ambient term.** The claim
+above that "a state whose trajectory never enters the band gives the same
+answer on all K trials" holds for the corridor gust alone, which `sigma(z)`
+gates on altitude. It is false for the adopted `sine+ambient` family. `build()`
+adds the ambient term as `white_noise` on the same `[1, 0]` mask with no
+altitude condition, so it acts on a start at any height, at every one of up to
+1200 control steps.
+
+Measured, not argued. Ten skipped starts from the `sharp` run (f_max 0.08,
+ambient 0.06) were re-flown 20 times each. Seven varied, having been recorded
+as certain successes: they came back 13, 15, 17, 17, 17, 17 and 18 of 20. The
+error runs both ways. In shard 447, 7 of 25 starts recorded as certain failures
+were also fuzzy, so 15 of its 34 skipped starts carried a wrong label. That 44%
+is a ceiling rather than a typical rate, because shard 447's few skipped starts
+hug the margin boundary where flipping is likeliest.
+
+No wider MARGIN repairs this. There is no altitude at which the ambient term
+switches off, so the premise never becomes true again. The shortcut now applies
+only when `ambient` is 0, which covers the `sine` and `uniform` models and the
+zero-disturbance baseline. Population effect on `fraction_interior`, measured
+over the repaired shards, is +0.34 points for `sharp` and +0.53 for `smooth`.
+
+Cost of dropping it is 1.63x the flights, 5,735,693 to 9,375,960 for one eval
+pass. Wall-clock barely moves: the finish time is set by the fully-reachable
+shards, which the shortcut never touched, and the freed cores were idle anyway.
+The already-collected runs were repaired rather than discarded, via
+`q2_corridor_topup.py` writing the missing flights as a second k-window that
+the reducer sums. That is sound because `rollout_seed` is a pure function of
+(base, split, state index, trial), so trial k draws the same noise whichever
+process rolls it. Verified against real collector output at a nonzero shard
+offset: five fuzzy starts at global indices 390,980 to 391,214 reproduced
+exactly, at 16, 4, 17, 4 and 9 of 20.
+
 ## Implementation
 
 One new `Disturbance` subclass. `SignalDependentNoise` cannot serve: its scale

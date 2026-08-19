@@ -294,3 +294,61 @@ def test_baseline_config_maps_to_level_zero_no_ambient(tmp_path, shard_dir):
         desc = json.load(fh)
     assert desc['generation_parameters']['corridor']['f_max'] == 0.0
     assert desc['generation_parameters']['noise_model']['model'] == 'sine'
+
+
+def test_draw_law_reports_the_sinusoid_not_the_falsified_uniform_draw():
+    '''describe() used to hardcode the per-step uniform draw for every model.
+
+    That draw was measured degenerate and replaced by the per-rollout sinusoid
+    (see AltitudeGatedSineNoise); NOISE_MODELS keeps 'uniform' only for
+    reproduction. Emitting it for a sine+ambient set told the consumer the
+    wrong law.
+    '''
+    law = q2cr.draw_law('sine+ambient')
+    assert 'sinusoid' in law['distribution']
+    assert 'per-rollout' in law['distribution']
+    assert 'sin(' in law['formula']
+    assert 'N(0, ambient_std)' in law['formula']
+    # The corridor gust is held for the episode; only the ambient term redraws.
+    assert 'deterministic function of (z, t)' in law['hold']
+    assert 'ambient term IS redrawn every step' in law['hold']
+
+
+def test_draw_law_keeps_the_uniform_model_describable_for_reproduction():
+    law = q2cr.draw_law('uniform')
+    assert law['distribution'] == 'uniform'
+    assert law['hold'] == 'zero-order, redrawn each control step (100 Hz)'
+    assert law['formula'] == 'F_x = U(0, sigma(z))'
+    assert 'N(0, ambient_std)' not in law['formula']
+
+
+def test_draw_law_marks_the_ambient_only_model_as_having_no_corridor():
+    law = q2cr.draw_law('ambient')
+    assert law['formula'] == 'F_x = N(0, ambient_std)'
+    assert law['low'] is None and law['high'] is None
+    assert 'two-sided' in law['applied_as']
+
+
+def test_draw_law_rejects_an_unknown_model():
+    with pytest.raises(ValueError, match='unknown noise model'):
+        q2cr.draw_law('brownian')
+
+
+def test_mechanism_block_agrees_with_the_resolved_noise_model(tmp_path, shard_dir):
+    '''Regression: the same JSON must not state two different disturbance laws.'''
+    _make_three_eval_shards(shard_dir)
+    _make_two_train_shards(shard_dir)
+    out_dir = str(tmp_path / 'out')
+    q2cr.main(['--level', str(LEVEL), '--ambient', str(AMBIENT), '--model', MODEL,
+               '--n_train', '2', '--n_eval', '3',
+               '--shard_dir', shard_dir, '--out_dir', out_dir])
+    with open(os.path.join(out_dir, 'dataset_description.json')) as fh:
+        desc = json.load(fh)
+    mech = desc['mechanism']
+    assert desc['generation_parameters']['noise_model']['model'] == MODEL
+    assert mech['distribution'] != 'uniform'
+    assert 'sin(' in mech['formula']
+    # mechanism and the corridor block are two views of one law.
+    assert mech['formula'] == desc['generation_parameters']['corridor']['formula']
+    # The ambient term is zero-mean, so the stack is no longer purely one-sided.
+    assert 'two-sided' in mech['applied_as']

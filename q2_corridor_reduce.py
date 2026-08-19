@@ -247,17 +247,83 @@ def reduce_eval(by_idx, level, ambient, model, out_dir):
                 k_total=max((khi for _, khi in window_tags), default=0))
 
 
+# The draw law, per noise model. These fields USED to be hardcoded to the
+# per-step uniform draw regardless of --model, which shipped a
+# dataset_description.json contradicting its own generation_parameters.
+# noise_model: the collected family is 'sine+ambient', whose corridor term is
+# a per-rollout sinusoid, while NOISE_MODELS marks 'uniform' as falsified and
+# keeps it only for reproduction. A consumer reading `mechanism` would have
+# been told the wrong law.
+_SINE_TERM = 'sigma(z) * (0.5 + 0.5*A*sin(2*pi/period*t + phi))'
+_UNIFORM_TERM = 'U(0, sigma(z))'
+_AMBIENT_TERM = 'N(0, ambient_std)'
+
+# model -> (corridor term, carries the ambient term)
+_DRAWS = {
+    'sine': (_SINE_TERM, False),
+    'sine+ambient': (_SINE_TERM, True),
+    'uniform': (_UNIFORM_TERM, False),
+    'ambient': (None, True),
+}
+
+
+def draw_law(model):
+    '''-> the mechanism-block fields that depend on which model produced the data.
+
+    Keys mirror q2_reduce.py's `mechanism` schema (distribution / low / high /
+    hold / applied_as) so the corridor family stays readable by whatever reads
+    the planar-force set, plus `formula` for the corridor block.
+    '''
+    if model not in _DRAWS:
+        raise ValueError(f'unknown noise model {model!r}; expected one of {sorted(_DRAWS)}')
+    corridor, has_ambient = _DRAWS[model]
+    terms = [t for t in (corridor, _AMBIENT_TERM if has_ambient else None) if t]
+
+    if corridor is _SINE_TERM:
+        dist = ('per-rollout coherent sinusoid -- A ~ U(0,1) and phi ~ U(-pi,pi) drawn '
+                'once in reset(), NOT a per-step draw')
+        hold = ('coherent per-rollout: A and phi are fixed for the episode, so the '
+                'corridor force is a deterministic function of (z, t)')
+        low, high = 0.0, 'sigma(z) (altitude-gated envelope)'
+    elif corridor is _UNIFORM_TERM:
+        dist = 'uniform'
+        hold = 'zero-order, redrawn each control step (100 Hz)'
+        low, high = 0.0, 'sigma(z) (altitude-gated)'
+    else:
+        dist = 'no corridor term -- ambient wobble only'
+        hold = 'n/a: no corridor term'
+        low, high = None, None
+
+    if has_ambient:
+        dist += '; plus zero-mean N(0, ambient_std) drawn i.i.d. every control step'
+        if corridor is not None:
+            hold += '. The ambient term IS redrawn every step, everywhere, not just in the band'
+
+    # The corridor term is one-sided (+x); the ambient term is zero-mean and
+    # therefore two-sided. Both ride the same mask [1, 0] -- see
+    # q2_corridor_common.build().
+    applied_as = ('[Fx, 0, 0] at the COM link -- NO torque; corridor term is one-sided (+x), '
+                  'ambient term is zero-mean and two-sided' if has_ambient and corridor is not None
+                  else '[Fx, 0, 0] at the COM link -- zero-mean, two-sided, NO torque' if has_ambient
+                  else '[Fx, 0, 0] at the COM link -- one-sided, +x only, NO torque')
+
+    return dict(distribution=dist, low=low, high=high, hold=hold, applied_as=applied_as,
+                formula='F_x = ' + ' + '.join(terms) if terms else 'F_x = 0')
+
+
 def describe(level, ambient, model, tr, ev):
     stack = resolve_noise_model(model, level, ambient)
+    law = draw_law(model)
     desc = {
         'dataset_name': ('2D Quadrotor RL (safe_explorer_ppo) under an '
                          f'altitude-gated corridor disturbance, model={model} '
                          f'f_max={level} ambient={ambient}'),
         'mechanism': {
             'kind': 'dynamics', 'dim': 1, 'frame': 'world',
-            'applied_as': '[Fx, 0, 0] at the COM link -- one-sided, +x only, NO torque',
-            'distribution': 'uniform', 'low': 0.0, 'high': 'sigma(z) (altitude-gated)',
-            'hold': 'coherent per-rollout sinusoid (draw_law sine), NOT redrawn per step',
+            'applied_as': law['applied_as'],
+            'distribution': law['distribution'], 'low': law['low'], 'high': law['high'],
+            'hold': law['hold'],
+            'formula': law['formula'],
             'matched': False,
             'reference_scale': {'body_weight_N': WEIGHT_N,
                                 'level_as_fraction_of_weight': float(level) / WEIGHT_N
@@ -323,7 +389,8 @@ def describe(level, ambient, model, tr, ev):
             'one_sided': True,
             'direction': '+x',
             'profile': PROFILE,
-            'formula': 'F_x ~ U(0, f_max * exp(-0.5*((z-centre)/width)**2))',
+            'formula': law['formula'],
+            'sigma': 'sigma(z) = f_max * exp(-0.5*((z-centre)/width)**2)',
             'f_max': float(level),
             'centre': CENTRE,
             'width': WIDTH,
