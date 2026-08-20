@@ -103,6 +103,18 @@ def missing_shards(by_idx, n_expected):
     return [i for i in range(n_expected) if i not in by_idx]
 
 
+# Column counts, asserted per shard so a layout regression fails at reduce
+# time rather than silently reaching the downstream model. Trajectory states
+# and eval starts are the 13-D quaternion row; train starts stay the 12-D
+# Euler row the sampler emits.
+NCOL_ROW13, NCOL_SAMPLER = 13, 12
+
+
+def _cols(a, want, path, what):
+    if a.ndim != 2 or a.shape[1] != want:
+        raise ValueError(f'{path}: {what} has shape {a.shape}, expected (n, {want})')
+
+
 def _check(d, level, ambient, model, path):
     if abs(float(d['f_max']) - level) > 1e-9:
         raise ValueError(f"{path}: f_max {float(d['f_max'])} != expected {level}")
@@ -127,6 +139,7 @@ def reduce_eval(by_idx, level, ambient, model, out_dir):
             d = np.load(path)
             _check(d, level, ambient, model, path)
             s, h = d['starts'], d['hits'].astype(np.int64)
+            _cols(s, NCOL_ROW13, path, 'eval starts')
             u, det = d['trials_used'].astype(np.int64), d['det_labels']
             if starts_ref is None:
                 starts_ref, det_ref = s, det
@@ -189,6 +202,8 @@ def reduce_train(by_idx, level, ambient, model, out_dir):
         path, _ = windows[0]
         d = np.load(path)
         _check(d, level, ambient, model, path)
+        _cols(d['states'], NCOL_ROW13, path, 'train states')
+        _cols(d['starts'], NCOL_SAMPLER, path, 'train starts')
         states.append(d['states'])
         offsets.extend((d['offsets'][1:] + offsets[-1]).tolist())
         starts.append(d['starts'])
@@ -273,10 +288,22 @@ def describe(level, ambient, model, tr, ev):
                                       'of the terminal state.')},
         'horizon': {'steps': 2000, 'seconds': 20.0},
         'data_format': {
+            # TWO layouts, not one. Trajectory states and eval starts are the
+            # 13-D quaternion row; train STARTS are the 12-D Euler row the
+            # sampler emits, kept verbatim so index i matches the shipped
+            # deterministic set row for row.
             'state_order': ['x', 'y', 'z', 'qw', 'qx', 'qy', 'qz',
                             'x_dot', 'y_dot', 'z_dot', 'p', 'q', 'r'],
-            'train': 'train.npz -- states(float32,13) offsets starts labels seeds',
-            'eval': 'roa_labels.txt / eval_states.txt -- 13 state cols + p_success',
+            'train_start_order': ['x', 'y', 'z', 'phi', 'theta', 'psi',
+                                  'x_dot', 'y_dot', 'z_dot', 'p', 'q', 'r'],
+            'angular_rate_frame': ('body -- p,q,r in a 13-D row are body rates; '
+                                   'the injector converts them to world'),
+            'train': ('train.npz -- states(float32, N x 13) offsets(int64, T+1) '
+                      'starts(float64, T x 12) labels(uint8, T) seeds(int64, T). '
+                      'Trajectory t is states[offsets[t]:offsets[t+1]].'),
+            'eval': ('roa_labels.txt / eval_states.txt -- 13 state cols + '
+                     'p_success. eval_success_prob.npz carries starts successes '
+                     'trials p_success det_labels.'),
             'precision': {'state': 6, 'p_success': 4},
         },
         'sampling': {
