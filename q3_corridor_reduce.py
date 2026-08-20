@@ -256,11 +256,17 @@ def draw_law(model):
         dist += '; plus zero-mean N(0, ambient_std) drawn i.i.d. every control step'
         if corridor is not None:
             hold += '. The ambient term IS redrawn every step, everywhere, not just in a band'
-    applied = ('[Fx, 0, 0] at the COM link -- NO torque; curtain term is one-sided (+x), '
-               'ambient term is zero-mean and two-sided' if has_amb and corridor is not None
-               else '[Fx, 0, 0] at the COM link -- one-sided, +x only, NO torque')
+    # Measured, not assumed. mask=[0,1,0] on a THREE_D quad selects index 1 of
+    # the disturb_force 3-vector, and quadrotor.py passes that vector through
+    # unchanged, so the force lands on y. The gate is on x. Probing the env
+    # with the drone parked at the curtain peak gives [0, 0.068, 0].
+    applied = ('[0, Fy, 0] at the COM link -- NO torque; the curtain is gated on x but '
+               'pushes along y, so the drone is shoved sideways as it crosses. Curtain '
+               'term is one-sided (+y); ambient term is zero-mean and two-sided'
+               if has_amb and corridor is not None else
+               '[0, Fy, 0] at the COM link -- gated on x, pushes along +y only, NO torque')
     return dict(distribution=dist, hold=hold, applied_as=applied,
-                formula='F_x = ' + ' + '.join(terms) if terms else 'F_x = 0')
+                formula='F_y = ' + ' + '.join(terms) if terms else 'F_y = 0')
 
 
 def describe(level, ambient, model, tr, ev):
@@ -270,16 +276,17 @@ def describe(level, ambient, model, tr, ev):
         'dataset_name': ('3D Quadrotor LQR under a twin-curtain corridor disturbance, '
                          f'model={model} f_max={level} ambient={ambient}'),
         'mechanism': {
-            'kind': 'dynamics', 'dim': 1, 'frame': 'world',
+            'kind': 'dynamics', 'dim': 3, 'active_component': 'y', 'frame': 'world',
             'applied_as': law['applied_as'], 'distribution': law['distribution'],
             'hold': law['hold'], 'formula': law['formula'], 'matched': False,
             'reference_scale': {'body_weight_N': WEIGHT_N,
                                 'level_as_fraction_of_weight': float(level) / WEIGHT_N
                                 if level else 0.0},
-            'note': ('Two curtains of disturbed air standing at x = +/-0.9 m, gated on '
-                     'the x coordinate rather than uniform over the state space. Each '
-                     'curtain draws independently, so the MEAN force at x is sigma(x)/2 '
-                     'while sigma is the sum of both peaks.'),
+            'note': ('Two vertical sheets of crosswind standing at x = +/-0.9 m. The '
+                     'gate is the x coordinate, the push is along y, so a drone '
+                     'crossing a sheet is shoved perpendicular to its crossing '
+                     'direction. Each curtain draws independently, so the MEAN force '
+                     'at x is sigma(x)/2 while sigma is the sum of both peaks.'),
         },
         'controller': {'type': 'lqr',
                        'note': 'the shipped quadrotor3D_lqr controller, unchanged'},
@@ -321,8 +328,13 @@ def describe(level, ambient, model, tr, ev):
         'generation_parameters': {
             'noise_model': stack,
             'corridor': {
-                'mechanism': 'x_gated_twin_curtain', 'channel': 'dynamics',
-                'one_sided': True, 'direction': '+x', 'twin': True,
+                'mechanism': 'x_gated_twin_crosswind_curtain', 'channel': 'dynamics',
+                'one_sided': True, 'gated_on': 'x', 'direction': '+y', 'twin': True,
+                'func_name_note': ('the registered function is called '
+                                   "'altitude_gated_sine', inherited from the quad2d "
+                                   'altitude corridor. Here it gates on x '
+                                   '(state_index 0) and pushes on y. The name is '
+                                   'legacy; gated_on and direction are authoritative.'),
                 'profile': PROFILE, 'formula': law['formula'],
                 'sigma': ('sigma(x) = f_max * [exp(-0.5*((x-x_c)/width)**2) '
                           '+ exp(-0.5*((x+x_c)/width)**2)]'),

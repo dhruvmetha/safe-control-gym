@@ -137,6 +137,12 @@ def resolve_noise_model(model, f_max, ambient=None):
     if corridor_func is not None and f_max > 0:
         base = {'disturbance_func': corridor_func, 'f_max': float(f_max),
                 'profile': PROFILE, 'width': WIDTH,
+                # mask multiplies the disturb_force 3-vector elementwise, and
+                # quadrotor.py hands that vector to pybullet unchanged for a
+                # THREE_D quad. So [0, 1, 0] puts the force on Y while
+                # GATE_COORD_INDEX gates on X: a crosswind sheet that shoves the
+                # drone sideways as it crosses, not a headwind it flies into.
+                # Probed 2026-08-19 at the curtain peak: force = [0, 0.068, 0].
                 'state_index': GATE_COORD_INDEX, 'mask': [0, 1, 0]}
         if corridor_func == 'altitude_gated_sine':
             base['period'] = SINE_PERIOD
