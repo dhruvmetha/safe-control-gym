@@ -242,10 +242,10 @@ flight can only score 0 or 1, so no in-between value is reachable. Baseline is t
 
 <div class="note">
 <p><strong>These maps are far fuzzier than the dataset as a whole, and that is expected.</strong>
-The published figure of roughly 8 to 10 fuzzy cells per 100 covers the full six-dimensional
-evaluation grid of 489,789 starts, most of which sit far from the corridor and never interact
-with it. These slices deliberately cut through the region where the corridor acts, so they
-concentrate exactly the states the global average dilutes. The two numbers measure different
+Measured over the full collected set, 7.01 fuzzy starts per 100 for sharp and 8.96 for smooth,
+across all 489,789 six-dimensional grid states. Most of those sit far from the corridor and never
+interact with it. These slices deliberately cut through the region where the corridor acts, so
+they concentrate exactly the states the global average dilutes. The two numbers measure different
 populations; neither contradicts the other.</p>
 </div>
 

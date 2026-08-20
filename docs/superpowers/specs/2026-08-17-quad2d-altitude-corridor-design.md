@@ -195,8 +195,28 @@ TWO configs, both collected [user, 2026-08-19]:
 
 | level name | F_max | alpha | retention | fuzzy | character |
 | --- | --- | --- | --- | --- | --- |
-| sharp | 0.08 | 0.06 | 0.74 | 8.5% | corridor-dominant: hard failure lobes, thin fuzzy rim |
-| smooth | 0.05 | 0.09 | 0.76 | 10.0% | wobble-dominant: wide 0-to-1 probability field |
+| sharp | 0.08 | 0.06 | 0.77 | 7.01% | corridor-dominant: hard failure lobes, thin fuzzy rim |
+| smooth | 0.05 | 0.09 | 0.76 | 8.96% | wobble-dominant: wide 0-to-1 probability field |
+
+MEASURED 2026-08-19, on the full collected set after the shortcut repair. The
+row above previously read 0.74/8.5% and 0.76/10.0%, taken from the 400-state
+sweep and from eval shards carrying the falsified reachability shortcut. Those
+are superseded.
+
+The numbers come from `q2_corridor_reduce.py` over all 489,789 eval states per
+config, each at exactly 20 trials, `trials_shortcut` 0 for both. Fuzzy is
+`fraction_interior` directly. Retention is the config's `mean_p_success`
+divided by the baseline's, so 0.0602/0.0778 and 0.0593/0.0778.
+
+The shortcut inflated fuzziness by about 1.2 points in each config and left
+retention almost untouched. That asymmetry is expected: a rescued start moves
+p up from 0 and a broken one moves p down from 1, so the two roughly cancel in
+the mean while both add to the interior count. Measured over the repaired
+shards, `sharp` has 8,786 rescued against 20,531 broken and `smooth` 4,478
+against 5,486.
+
+The pair still brackets what the design wanted, near-equal retention with
+different texture, and `smooth` remains the fuzzier of the two.
 
 plus a same-code baseline (F=0, alpha=0). Eval runs K=20 with the trial-window
 mechanism (--trial_lo): a later top-up to K=50 draws bit-identical trials
