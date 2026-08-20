@@ -52,6 +52,7 @@ AXES = {
 
 ARGS = None
 STATES = None
+CELL_LO = 0        # global index of STATES[0]; the seed must not depend on sharding
 
 
 def grid_states(axis, y=0.0, z=1.5):
@@ -85,9 +86,9 @@ def grid_states(axis, y=0.0, z=1.5):
     return np.asarray(states, dtype=np.float64), xs, avals
 
 
-def _init(a, states):
-    global ARGS, STATES
-    ARGS, STATES = a, states
+def _init(a, states, cell_lo):
+    global ARGS, STATES, CELL_LO
+    ARGS, STATES, CELL_LO = a, states, cell_lo
 
 
 def _range(rng_pair):
@@ -98,13 +99,31 @@ def _range(rng_pair):
         for i in range(lo, hi):
             ok_count = 0
             for k in range(ARGS.trials):
+                # Seed on the GLOBAL cell index, so splitting the grid across
+                # more tasks cannot change what any cell draws.
                 ok, _, _ = roll(env, ctrl, STATES[i],
-                                rollout_seed(ARGS.base_seed, SLICE_SPLIT_ID, i, k))
+                                rollout_seed(ARGS.base_seed, SLICE_SPLIT_ID,
+                                             CELL_LO + i, k))
                 ok_count += int(ok)
             p[i - lo] = ok_count / ARGS.trials
     finally:
         env.close()
     return lo, hi, p
+
+
+def _save(args, p, xs, avals):
+    np.savez(args.out, p=p.reshape(NA, NX), xs=xs, avals=avals, axis=args.axis,
+             model=args.model, f_max=args.f_max, y=args.y, z=args.z,
+             ambient=-1.0 if args.ambient is None else args.ambient,
+             trials=args.trials)
+    fuzzy = float(np.mean((p > 0) & (p < 1)))
+    print(f'{args.out}: mean p {p.mean():.4f}, fuzzy {fuzzy:.4f}, '
+          f'span {p.min():.2f}-{p.max():.2f}', flush=True)
+    # A slice with no boundary in it teaches nothing about how the curtain moves
+    # that boundary, so say so rather than leave it to the eye.
+    if args.f_max == 0 and args.trials == 1:
+        verdict = 'HAS a boundary' if 0.02 < p.mean() < 0.98 else 'FLAT, discard this slice'
+        print(f'  deterministic gate: {verdict} (mean {p.mean():.3f})', flush=True)
 
 
 def main(argv=None):
@@ -119,30 +138,54 @@ def main(argv=None):
     ap.add_argument('--base_seed', type=int, default=20260817)
     ap.add_argument('--y', type=float, default=0.0)
     ap.add_argument('--z', type=float, default=1.5)
+    ap.add_argument('--shard', type=int, default=0,
+                    help='which cell-range of the grid this task computes')
+    ap.add_argument('--nshards', type=int, default=1,
+                    help='split the grid across this many tasks; merge with --merge')
+    ap.add_argument('--merge', action='store_true',
+                    help='combine shard partials named <out>.part<k> into <out>')
     ap.add_argument('--out', required=True)
     args = ap.parse_args(argv)
+    if not 0 <= args.shard < args.nshards:
+        ap.error(f'--shard {args.shard} out of range for --nshards {args.nshards}')
 
     states, xs, avals = grid_states(args.axis, args.y, args.z)
+    n_all = len(states)
+
+    if args.merge:
+        # Partials cover disjoint cell ranges by construction, so a plain sum
+        # reassembles the grid; assert full coverage rather than trust it.
+        p = np.zeros(n_all)
+        seen = np.zeros(n_all, dtype=bool)
+        for k in range(args.nshards):
+            d = np.load(f'{args.out}.part{k}.npz')
+            lo, hi = int(d['lo']), int(d['hi'])
+            p[lo:hi] = d['p']
+            seen[lo:hi] = True
+        if not seen.all():
+            raise SystemExit(f'[ERROR] q3_corridor_slice.py: merge is missing '
+                             f'{int((~seen).sum())} of {n_all} cells')
+        _save(args, p, xs, avals)
+        return
+
+    # This task's slice of the grid.
+    cut = np.linspace(0, n_all, args.nshards + 1).astype(int)
+    c_lo, c_hi = int(cut[args.shard]), int(cut[args.shard + 1])
+    states = states[c_lo:c_hi]
     n = len(states)
     edges = np.linspace(0, n, args.procs + 1).astype(int)
     ranges = [(int(edges[k]), int(edges[k + 1])) for k in range(args.procs)]
     p = np.zeros(n)
-    with Pool(args.procs, initializer=_init, initargs=(args, states)) as pool:
+    with Pool(args.procs, initializer=_init, initargs=(args, states, c_lo)) as pool:
         for lo, hi, pv in pool.imap_unordered(_range, ranges):
             p[lo:hi] = pv
 
-    np.savez(args.out, p=p.reshape(NA, NX), xs=xs, avals=avals, axis=args.axis,
-             model=args.model, f_max=args.f_max, y=args.y, z=args.z,
-             ambient=-1.0 if args.ambient is None else args.ambient,
-             trials=args.trials)
-    fuzzy = float(np.mean((p > 0) & (p < 1)))
-    print(f'{args.out}: mean p {p.mean():.4f}, fuzzy {fuzzy:.4f}, '
-          f'span {p.min():.2f}-{p.max():.2f}', flush=True)
-    # The gate: a slice with no boundary in it teaches nothing about how the
-    # curtain moves that boundary, so say so rather than leave it to the eye.
-    if args.f_max == 0 and args.trials == 1:
-        verdict = 'HAS a boundary' if 0.02 < p.mean() < 0.98 else 'FLAT, discard this slice'
-        print(f'  deterministic gate: {verdict} (mean {p.mean():.3f})', flush=True)
+    if args.nshards > 1:
+        np.savez(f'{args.out}.part{args.shard}.npz', p=p, lo=c_lo, hi=c_hi)
+        print(f'{args.out}.part{args.shard}.npz: cells {c_lo}:{c_hi}, '
+              f'mean p {p.mean():.4f}', flush=True)
+        return
+    _save(args, p, xs, avals)
 
 
 if __name__ == '__main__':
