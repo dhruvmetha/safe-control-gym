@@ -27,7 +27,8 @@ import os
 
 import numpy as np
 
-from generate_quadrotor_3d_noisy import N_TRAIN, eval_starts, rollout_seed, sampler_starts, to_row13
+from generate_quadrotor_3d_noisy import (N_TRAIN, eval_starts, inject_sampler, rollout_seed, run,
+                                         sampler_starts)
 from q3_corridor_common import BAND, NOISE_MODELS, build, roll
 
 TRAIN_SPLIT_ID, EVAL_SPLIT_ID = 0, 1
@@ -80,24 +81,34 @@ def shard_eval(args, lo, hi):
 
 def shard_train(args, lo, hi):
     '''One rollout per start, states kept. Never shortcuts: train wants the
-    trajectory, not a probability, so there is nothing to skip.'''
-    starts = sampler_starts()[lo:hi]
+    trajectory, not a probability, so there is nothing to skip.
+
+    Uses inject_sampler, NOT roll(). roll() injects via inject_stored, which
+    reads the shipped eval rows' interleaved order. sampler_starts() returns
+    GROUPED order, [x, y, z, phi, theta, psi, ...], so passing it through
+    to_row13 feeds theta in as z and psi as z_dot. Measured 2026-08-19 before
+    this was fixed: every trajectory ran 6 steps and success was 0 of 40,
+    exactly what inject_sampler's own docstring predicts.
+    '''
+    starts = np.asarray(sampler_starts()[lo:hi])
     env, ctrl = build(args.level, model=args.model, ambient=args.ambient)
-    states, offsets, labels, seeds, kept_starts = [], [0], [], [], []
+    states, offsets, labels, seeds = [], [0], [], []
     try:
         for i in range(len(starts)):
             seed = rollout_seed(args.base_seed, TRAIN_SPLIT_ID, lo + i, 0)
-            ok, _, traj = roll(env, ctrl, to_row13(starts[i]), seed, keep=True)
+            env.reset(seed=int(seed))
+            ctrl.reset()
+            obs = inject_sampler(env, starts[i])
+            ok, traj = run(env, ctrl, obs, keep_states=True)
             states.append(np.asarray(traj, dtype=np.float32))
             offsets.append(offsets[-1] + len(traj))
             labels.append(int(ok))
             seeds.append(seed)
-            kept_starts.append(to_row13(starts[i]))
     finally:
         env.close()
     np.savez(args.out, states=np.concatenate(states),
              offsets=np.asarray(offsets, dtype=np.int64),
-             starts=np.asarray(kept_starts), labels=np.asarray(labels, dtype=np.int8),
+             starts=starts.astype(np.float64), labels=np.asarray(labels, dtype=np.uint8),
              seeds=np.asarray(seeds, dtype=np.int64), lo=lo, hi=hi,
              f_max=args.level, model=args.model, trial_lo=0, trials=1,
              ambient=-1.0 if args.ambient is None else args.ambient)
