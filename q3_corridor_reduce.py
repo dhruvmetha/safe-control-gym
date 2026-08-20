@@ -188,6 +188,33 @@ def reduce_eval(by_idx, level, ambient, model, out_dir):
                 num_windows=len(window_tags), k_total=max(window_tags, default=0))
 
 
+# Units per 13-D state column, for the achieved_bounds block.
+_UNITS = dict(x='m', y='m', z='m', qw='unitless', qx='unitless', qy='unitless',
+              qz='unitless', x_dot='m/s', y_dot='m/s', z_dot='m/s',
+              p='rad/s', q='rad/s', r='rad/s')
+_COLS = ['x', 'y', 'z', 'qw', 'qx', 'qy', 'qz', 'x_dot', 'y_dot', 'z_dot', 'p', 'q', 'r']
+
+
+def achieved_bounds(states):
+    '''Per-column min/max over every state in train.npz, including the final
+    out-of-bounds state of a terminated rollout.
+
+    Sumanth added this block by hand to the published descriptions on
+    2026-08-20, following the deterministic dataset's convention. Computing it
+    here instead means a republish regenerates it rather than dropping it.
+    '''
+    lo, hi = states.min(axis=0), states.max(axis=0)
+    out = {'description': ('Actual min/max values achieved across all trajectories in '
+                           "this level's train.npz (includes final out-of-bounds "
+                           'states). Computed by the reducer; same convention as the '
+                           'deterministic dataset_description.json.')}
+    for i, name in enumerate(_COLS):
+        out[name] = {'min': round(float(lo[i]), 6), 'max': round(float(hi[i]), 6),
+                     'unit': _UNITS[name]}
+    out['n_states_measured'] = int(len(states))
+    return out
+
+
 def reduce_train(by_idx, level, ambient, model, out_dir):
     '''Train shards have exactly one window; asserts that rather than silently
     merging, since a top-up scheme has never applied to train.'''
@@ -227,7 +254,8 @@ def reduce_train(by_idx, level, ambient, model, out_dir):
     return dict(num_trajectories=int(len(labels)), success_count=int(labels.sum()),
                 success_rate=float(labels.mean()),
                 mean_length=float(lengths.mean()), max_length=int(lengths.max()),
-                total_states=int(len(states)), shards=len(by_idx), model=model)
+                total_states=int(len(states)), shards=len(by_idx), model=model,
+                bounds=achieved_bounds(states))
 
 
 # The draw law per model, derived rather than hardcoded. See the module
@@ -347,8 +375,9 @@ def describe(level, ambient, model, tr, ev):
                 'independent_curtains': True,
             },
         },
-        'train_statistics': tr,
+        'train_statistics': {k: v for k, v in tr.items() if k != 'bounds'} if tr else tr,
         'eval_statistics': ev,
+        'achieved_bounds': tr.get('bounds') if tr else None,
     }
 
 

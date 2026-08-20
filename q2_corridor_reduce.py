@@ -181,7 +181,34 @@ def reduce_train(by_idx, level, ambient, model, out_dir):
                 success_rate=float(labels.mean()),
                 mean_length=float(lengths.mean()), max_length=int(lengths.max()),
                 hit_horizon=int((lengths - 1 >= HORIZON).sum()),
-                total_states=int(len(states)), shards=len(by_idx), model=model)
+                total_states=int(len(states)), shards=len(by_idx), model=model,
+                bounds=achieved_bounds(states))
+
+
+# Units per 6-D state column, for the achieved_bounds block. File order is
+# [x, z, theta, x_dot, z_dot, theta_dot], grouped, not the env's interleaved order.
+_UNITS = dict(x='m', z='m', theta='rad', x_dot='m/s', z_dot='m/s', theta_dot='rad/s')
+_COLS = ['x', 'z', 'theta', 'x_dot', 'z_dot', 'theta_dot']
+
+
+def achieved_bounds(states):
+    """Per-column min/max over every state in train.npz, including the final
+    out-of-bounds state of a terminated rollout.
+
+    Sumanth added this block by hand to the published descriptions on
+    2026-08-20, following the deterministic dataset's convention. Computing it
+    here instead means a republish regenerates it rather than dropping it.
+    """
+    lo, hi = states.min(axis=0), states.max(axis=0)
+    out = {'description': ('Actual min/max values achieved across all trajectories in '
+                           "this level's train.npz (includes final out-of-bounds "
+                           'states). Computed by the reducer; same convention as the '
+                           'deterministic dataset_description.json.')}
+    for i, name in enumerate(_COLS):
+        out[name] = {'min': round(float(lo[i]), 6), 'max': round(float(hi[i]), 6),
+                     'unit': _UNITS[name]}
+    out['n_states_measured'] = int(len(states))
+    return out
 
 
 def reduce_eval(by_idx, level, ambient, model, out_dir):
@@ -378,8 +405,9 @@ def describe(level, ambient, model, tr, ev):
             'note': ('The disturbance strength is excluded from the seed, so '
                      'levels are paired under common random numbers.'),
         },
-        'train_statistics': tr,
+        'train_statistics': {k: v for k, v in tr.items() if k != 'bounds'} if tr else tr,
         'eval_statistics': ev,
+        'achieved_bounds': tr.get('bounds') if tr else None,
     }
     desc['generation_parameters'] = {
         'noise_model': stack,
