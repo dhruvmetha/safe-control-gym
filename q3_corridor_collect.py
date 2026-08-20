@@ -55,12 +55,22 @@ def shard_eval(args, lo, hi):
             # Trial 0 doubles as the reachability probe. In a top-up window
             # (trial_lo > 0) it replays identically by seeding and is NOT
             # counted; its hits/used belong to the first window's file.
-            ok, _, _, entered = roll(env, ctrl, starts[i],
-                                     rollout_seed(args.base_seed, EVAL_SPLIT_ID, lo + i, 0),
-                                     track_band=True)
-            if args.trial_lo == 0:
-                hits[i] = int(ok)
-                used[i] = 1
+            #
+            # Only fly it when something reads it. The first window records
+            # its hit, and the shortcut needs `entered`. A top-up window with
+            # an ambient term needs neither, so flying it is dead work: one
+            # wasted rollout per state, ~2M across the quad3d K=20 to K=50
+            # campaign. Seeds are a pure function of (index, trial), so
+            # skipping it changes no k >= 1 draw.
+            entered = False
+            if args.trial_lo == 0 or not ambient_on:
+                ok, _, _, entered = roll(
+                    env, ctrl, starts[i],
+                    rollout_seed(args.base_seed, EVAL_SPLIT_ID, lo + i, 0),
+                    track_band=True)
+                if args.trial_lo == 0:
+                    hits[i] = int(ok)
+                    used[i] = 1
             if not ambient_on:
                 reachable = entered or _within_margin(float(starts[i][0]))
                 if args.level == 0 or not reachable:
@@ -82,6 +92,15 @@ def shard_eval(args, lo, hi):
 def shard_train(args, lo, hi):
     '''One rollout per start, states kept. Never shortcuts: train wants the
     trajectory, not a probability, so there is nothing to skip.
+
+    DEADLINE MISMATCH, known and recorded. run() is hardcoded to
+    generate_quadrotor_3d_noisy.HORIZON = 1000 steps (10 s), while eval's
+    roll() uses q3_corridor_common.HORIZON = 2000 (20 s, the memo-D
+    deadline). So train labels sit at a stricter deadline than eval labels.
+    Measured 2026-08-20 on the shipped data: 1 of 800,000 trajectories at
+    f_max 0.25 was truncated by it and 0 at 0.30, so it was left alone
+    rather than triggering an 800k-trajectory recollect. Changing it means
+    recollecting train; do not flip it silently mid-family.
 
     Uses inject_sampler, NOT roll(). roll() injects via inject_stored, which
     reads the shipped eval rows' interleaved order. sampler_starts() returns

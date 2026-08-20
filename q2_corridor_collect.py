@@ -84,12 +84,22 @@ def shard_eval(args, lo, hi):
             # Trial 0 is always the reachability probe. In a top-up window
             # (trial_lo > 0) it replays identically by seeding and is NOT
             # counted -- its hits/used live in the first window's file.
-            ok, _, _, entered = roll(env, ctrl, starts[i],
-                                     rollout_seed(args.base_seed, EVAL_SPLIT_ID, lo + i, 0),
-                                     track_band=True)
-            if args.trial_lo == 0:
-                hits[i] = int(ok)
-                used[i] = 1
+            #
+            # Only fly it when something reads it. The first window records
+            # its hit, and the shortcut below needs `entered`. A top-up window
+            # with an ambient term needs neither, so flying it is dead work:
+            # one wasted rollout per state, ~1M across the quad2d K=20 to
+            # K=50 campaign. Seeds are a pure function of (index, trial), so
+            # skipping it changes no k >= 1 draw.
+            entered = False
+            if args.trial_lo == 0 or not ambient_on:
+                ok, _, _, entered = roll(
+                    env, ctrl, starts[i],
+                    rollout_seed(args.base_seed, EVAL_SPLIT_ID, lo + i, 0),
+                    track_band=True)
+                if args.trial_lo == 0:
+                    hits[i] = int(ok)
+                    used[i] = 1
             # The shortcut is sound only when EVERY disturbance term is gated
             # on altitude. The corridor gust is, through sigma(z). The ambient
             # term is NOT -- build() adds it as white_noise with no altitude

@@ -321,7 +321,24 @@ def describe(level, ambient, model, tr, ev):
         'success_criteria': {'type': 'goal_reached', 'entry_cut': True,
                              'note': ('Stops at first entry, so the label is a function '
                                       'of the terminal state.')},
-        'horizon': {'steps': 2000, 'seconds': 20.0},
+        # The two splits do NOT share a deadline, so reporting one number
+        # would be wrong for one of them. Eval goes through
+        # q3_corridor_common.roll(), which runs to that module's HORIZON=2000
+        # (the memo-D deadline). Train goes through
+        # generate_quadrotor_3d_noisy.run(), hardcoded to the older
+        # HORIZON=1000 that the noisy_dynamics family was labelled at.
+        # Measured 2026-08-20: the train deadline truncated 1 of 800,000
+        # trajectories at f_max 0.25 and 0 at 0.30, so the mismatch is
+        # recorded rather than recollected.
+        'horizon': {
+            'eval': {'steps': 2000, 'seconds': 20.0, 'ctrl_freq_hz': 100},
+            'train': {'steps': 1000, 'seconds': 10.0, 'ctrl_freq_hz': 100},
+            'note': ('Split-dependent deadline. Eval labels are bounded-time reach '
+                     'probabilities at 20 s; train labels at 10 s. Under this '
+                     'disturbance the controller mostly still reaches the goal and '
+                     'just takes longer, so neither is an asymptotic reach '
+                     'probability.'),
+        },
         'data_format': {
             # TWO layouts, not one. Trajectory states and eval starts are the
             # 13-D quaternion row; train STARTS are the 12-D Euler row the
